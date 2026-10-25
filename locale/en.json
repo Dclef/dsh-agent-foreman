@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Foreman",
+    "description": "Dispatch work orders to contractor subagents with per-member model selection; results flow back onto a shared board the parent reviews and reworks."
+  }
+}

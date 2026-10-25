@@ -1,0 +1,11 @@
+# 包工头（dsh-agent-foreman）
+#
+# 只插一行：整块能力都长在这一个插件上——名册、派单引擎、看板、设置页都由
+# lib/index.js 挂载。分包商（承包商）是运行时数据，不是 cordis 插件行，所以
+# 这里没有第二个 id。
+#
+# 客户端半边（设置页里的名册编辑器）由 package.json 的 dsh.client 声明，
+# 宿主自动加载 lib/client.js，无需在此重复。
+- insert:
+    - id: dsh-agent-foreman
+      name: dsh-agent-foreman
