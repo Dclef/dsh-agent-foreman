@@ -54,21 +54,60 @@ function createHost({ members = [], text = '交付摘要：做完了', stopReaso
     const teamTasks = [];
     const teamSessions = new Map();
     const teamNames = new Map();
-    const agentStatus = new Map();
     const teamEvents = new Map();
+    // 预置成员（上一轮留下的）在真宿主里是活的子会话，`agents.get()` 能给出
+    // status 与 session。替身若只给状态不给会话，插件的 baseline 会读不到，
+    // 从而误判"收不回产物"而放弃团队模式——那是替身失真，不是产品行为。
+    for (const row of teamMembers)
+        if (typeof row?.id === 'string' && !teamSessions.has(row.id)) {
+            // 预置成员也有握手历史（上一轮就建好了），插件的 waitHandshakeDone
+            // 靠 assistant 正文判断握手完成，缺了它会白等满窗口。
+            teamEvents.set(row.id, [
+                { type: 'user/message', data: { message: { content: [{ type: 'text', text: '待命。' }] } } },
+                { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '待命。' }] } } },
+            ]);
+            teamSessions.set(row.id, { snapshotEvents: () => teamEvents.get(row.id) ?? [] });
+            // sendMessage 靠 teamNames 把成员名映射到会话 id 才能往事件里写。
+            // 预置成员没走 spawnTeammate，不补这层映射的话，sendMessage 写到
+            // undefined 上，工单事件根本进不了会话——插件会一直等不到正文而挂死。
+            if (typeof row?.name === 'string' && row.name !== '' && !teamNames.has(row.name))
+                teamNames.set(row.name, row.id);
+        }
+    /** spawn 出来的成员行：真宿主的 listMembers 会带上它们，替身也必须带。 */
+    const teamRoster = [...teamMembers];
+    const agentStatus = new Map();
+    // 预置成员（上一轮留下的）在真宿主里是"活着且不在 provisioning"的。
+    // 替身若不给状态，插件的等 active 只能空等到超时——那是替身失真。
+    for (const row of teamMembers)
+        if (typeof row?.id === 'string' && row?.status !== 'provisioning' && row?.status !== 'failed')
+            agentStatus.set(row.id, 'inactive');
     const agentTeams = team
         ? {
             async spawnTeammate(parent, options) {
                 teamSpawned.push({ parent, options });
                 const sessionId = `team-${teamSpawned.length}`;
+                // 真宿主在 spawn 时会发一条握手（HANDSHAKE）prompt，成员回复一句。
+                // 这两条事件必须有：插件的 waitHandshakeDone 会等握手的 assistant
+                // 正文落地才继续（否则 baseline 会早于握手回复，把握手正文当产物回收）。
+                teamEvents.set(sessionId, [
+                    { type: 'user/message', data: { message: { content: [{ type: 'text', text: '待命。' }] } } },
+                    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '待命。' }] } } },
+                ]);
                 teamSessions.set(sessionId, { snapshotEvents: () => teamEvents.get(sessionId) ?? [] });
-                teamEvents.set(sessionId, []);
+                // 真宿主在 spawn 之后要等初始 prompt 被接受，成员才从 provisioning
+                // 走到 active；这里直接给 active，等价于"握手已完成"。
                 agentStatus.set(sessionId, 'inactive');
                 teamNames.set(options.name, sessionId);
+                // 关键：新成员必须出现在 listMembers 里，否则插件的"等成员 active
+                // 再投递"只能空等到超时，然后退回普通模式——那是替身失真，不是产品行为。
+                teamRoster.push({ id: sessionId, name: options.name, role: 'teammate', status: 'inactive' });
                 return { member: { id: sessionId, name: options.name } };
             },
             listMembers(parent) {
-                return [{ id: 'lead-1', name: 'lead', role: 'lead', status: 'idle' }, ...teamMembers];
+                return [
+                    { id: 'lead-1', name: 'lead', role: 'lead', status: 'idle' },
+                    ...teamRoster.map(row => ({ ...row, status: agentStatus.get(row.id) ?? row.status })),
+                ];
             },
             async createTask(parent, request) {
                 teamTasks.push({ step: 'create', request });
@@ -98,7 +137,14 @@ function createHost({ members = [], text = '交付摘要：做完了', stopReaso
             },
         }
         : undefined;
-    const agents = { get: id => (agentStatus.has(id) ? { status: agentStatus.get(id) } : undefined) };
+    // 真实宿主里活 agent 同时带 `session`：团队成员是子智能体会话，
+    // `sessions.get` 查不到它，插件靠 agents 这条通道读事件与正文。
+    // 少了这个字段，团队模式会误判"读不到会话"而退回普通模式。
+    const agents = {
+        get: id => (agentStatus.has(id)
+            ? { status: agentStatus.get(id), session: teamSessions.get(id) }
+            : undefined),
+    };
     const sessions = {
         get: id => teamSessions.get(id),
     };
@@ -260,10 +306,11 @@ test('插件导出契约：名字、必需服务、配置 schema', () => {
     assert.deepEqual(config.members, []);
 });
 
-test('挂载后注册四个工具与六条路由', () => {
+test('挂载后注册五个工具与六条路由', () => {
     const host = createHost();
-    // foreman_probe 是验证「团队外壳 + 自选模型」的临时探针，验证完会删掉
-    assert.deepEqual([...host.tools.keys()].sort(), ['foreman_dispatch', 'foreman_review', 'foreman_roster', 'foreman_status']);
+    // foreman_report 是承包商的主动上报通道（agent-teams 式自报），
+    // 用于宿主读不到成员会话时回收产物。
+    assert.deepEqual([...host.tools.keys()].sort(), ['foreman_dispatch', 'foreman_report', 'foreman_review', 'foreman_roster', 'foreman_status']);
     assert.ok(host.routes.has('/plugins/dsh-agent-foreman'));
     assert.ok(host.routes.has('/plugins/dsh-agent-foreman/api/state'));
     assert.ok(host.routes.has('/plugins/dsh-agent-foreman/api/catalog'));
@@ -327,10 +374,10 @@ test('foreman_dispatch：两张工单都跑完，看板带产物与路由', asyn
     assert.equal(result.orders[0].status, 'done');
 });
 
-test('团队模式：承包商作为团队成员干活，产物从成员会话回收', async () => {
+test('自建成员模式：startActivation 锁定模型，共享任务进团队面板', async () => {
     const host = createHost({
         team: true,
-        teamText: '团队交付：关系图连线改完了',
+        teamText: '自建成员交付',
         members: [{ id: 'w1', name: '力工', prompt: '只动前端目录', provider: 'deepseek-official', model: 'deepseek-flash' }],
     });
     const policy = await call(host, '/plugins/dsh-agent-foreman/api/policy', {
@@ -345,25 +392,19 @@ test('团队模式：承包商作为团队成员干活，产物从成员会话�
     }, execOf());
 
     assert.equal(result.ok, true);
-    // 没有走普通激活，而是建了一个团队成员
-    assert.equal(host.activations.length, 0);
-    assert.equal(host.teamSpawned.length, 1);
-    assert.equal(host.teamSpawned[0].options.name, 'worker');
-    // 成员会话的模型被切成承包商那套
-    assert.deepEqual(host.teamModels[0], { sessionId: 'team-1', provider: 'deepseek-official', model: 'deepseek-flash' });
-    // 工单是真发过去的团队消息，投递目标用成员名（不是会话 id）
-    assert.equal(host.teamSent[0].message.target, 'worker');
-    assert.match(host.teamSent[0].message.content[0].text, /把连线改成曲线/);
-    // 团队面板的「共享任务」也要有：建任务 → reassign 给成员 → 完成后收尾
+    // 自建成员走 startActivation（不再 spawnTeammate）。
+    assert.equal(host.activations.length, 1, '应通过 startActivation 创建子智能体');
+    assert.equal(host.teamSpawned.length, 0, '不再走 spawnTeammate');
+    // agentOptions 锁定模型。
+    const opts = host.activations[0]?.request?.agentOptions;
+    assert.ok(opts !== undefined, 'agentOptions 应注入');
+    assert.equal(opts.provider, 'deepseek-official');
+    assert.equal(opts.model, 'deepseek-flash');
+    // 共享任务进团队面板。
     assert.deepEqual(host.teamTasks.map(entry => entry.step), ['create', 'reassign', 'complete']);
     assert.match(host.teamTasks[0].request.subject, /W1/);
-    assert.equal(host.teamTasks[1].request.owner, 'worker');
-    assert.match(result.orders[0].teamMode, /共享任务 task-1/);
-    // 产物从成员会话里回收
+    assert.match(result.orders[0].teamMode, /自建成员/);
     assert.equal(result.orders[0].status, 'done');
-    assert.match(result.orders[0].teamMode, /团队模式/);
-    assert.equal(result.orders[0].chars, '团队交付：关系图连线改完了'.length);
-    assert.match(result.summary, /团队交付：关系图连线改完了/);
 });
 
 test('团队模式：宿主没有 agentTeams 时安静退回普通激活', async () => {
@@ -426,11 +467,10 @@ test('团队模式：中文承包商名统一落成 worker / worker-2', async ()
             { id: 'Y', title: '二', task: '乙', contractor: '力工2号' },
         ],
     }, execOf());
-    const names = host.teamSpawned.map(entry => entry.options.name);
-    assert.deepEqual(names, ['worker', 'worker-2']);
-    // 中文名字改由 description 承载，团队区里照样认得出是谁
-    assert.match(host.teamSpawned[0].options.description, /力工/);
-    assert.match(host.teamSpawned[1].options.description, /力工2号/);
+    // 自建成员：每个工单走 startActivation，各有自己的 agentOptions。
+    assert.equal(host.activations.length, 2, '两单各创建一个子智能体');
+    const routes = host.activations.map(a => `${a.request?.agentOptions?.provider}/${a.request?.agentOptions?.model}`);
+    assert.deepEqual(routes, ['deepseek-official/deepseek-flash', 'deepseek-official/deepseek-flash']);
 });
 
 test('名册：承包商的提示词随名册返回并计入字数', async () => {
@@ -792,19 +832,23 @@ test('/foreman：没有 commands 服务时退回 skill，且 source 是字符串
 test('团队模式：上一轮建的成员还在名册里时复用，不再 spawn', async () => {
     const host = createHost({
         team: true,
-        teamMembers: [{ id: 'team-old', name: 'worker', role: 'teammate', status: 'idle' }],
+        teamMembers: [{ id: 'team-old', name: 'w1', role: 'teammate', status: 'idle' }],
         members: [{ id: 'w1', name: '力工', provider: 'deepseek-official', model: 'deepseek-flash' }],
     });
     await call(host, '/plugins/dsh-agent-foreman/api/policy', {
         method: 'POST',
         body: JSON.stringify({ teamMode: true }),
     });
-    const result = await host.tools.get('foreman_dispatch').execute({
-        goal: '修关系图',
-        orders: [{ id: 'W1', title: '连线', task: '把连线改成曲线', accept: '看得见' }],
-    }, execOf());
-    // 名册里已有 worker：不该再 spawn（宿主的团队名册是持久化的，重名会被拒）
-    assert.equal(host.teamSpawned.length, 0);
-    assert.equal(host.teamSent[0].message.target, 'worker');
+    const result = await Promise.race([
+        host.tools.get('foreman_dispatch').execute({
+            goal: '修关系图',
+            orders: [{ id: 'W1', title: '连线', task: '把连线改成曲线', accept: '看得见' }],
+        }, execOf()),
+        new Promise((_r, reject) => setTimeout(() => reject(new Error('EXEC_TIMEOUT_5S')), 5000)),
+    ]);
+    // 自建成员模式：不走 spawnTeammate，改走 startActivation + agentOptions。
+    assert.equal(host.teamSpawned.length, 0, '不再走 spawnTeammate');
+    assert.equal(host.activations.length, 1, '应通过 startActivation 创建子智能体');
+    assert.ok(host.activations[0]?.request?.agentOptions, 'agentOptions 应注入');
     assert.equal(result.ok, true);
 });

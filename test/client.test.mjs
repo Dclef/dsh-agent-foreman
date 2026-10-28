@@ -58,7 +58,7 @@ function textOf(node, into = []) {
     return into;
 }
 
-test('客户端半边只注册设置座位（会话头「成员」按钮已按需求删掉）', async () => {
+test('客户端注册设置座位与会话头「工地」按钮', async () => {
     await import('../lib/client.js');
     const module = loaded[0];
     const client = module.factory((name) => {
@@ -82,5 +82,5 @@ test('客户端半边只注册设置座位（会话头「成员」按钮已按�
         },
         effect: (setup) => setup(),
     });
-    assert.deepEqual(seats.map(seat => seat.name), ['settings.section']);
+    assert.deepEqual(seats.map(seat => seat.name).sort(), ['conversation.session.header.actions', 'settings.section']);
 });
