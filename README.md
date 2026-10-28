@@ -22,7 +22,8 @@ Foreman splits it in two:
   2 and it can. That prompt is prepended to every order the contractor receives. **The minimal setup
   is a single 力工.**
 - **Orders** — the work the parent agent splits out. Each order carries a task and acceptance
-  criteria, and may name a contractor or rotate automatically.
+  criteria, and may name a contractor or leave it out to be picked by live load (busy contractors
+  are skipped, the least loaded one wins, and a rotation cursor breaks ties — cross-session).
 
 The parent only splits work and reviews results. Everything in between happens in isolated child
 sessions, and the products come back as one shared board.
@@ -106,9 +107,20 @@ Dispatch notes:
 
 - `orders[].task` **must be self-contained** — the child cannot see the parent's context.
 - `orders[].contractor` accepts a contractor **name or id**, or a `role` trade label; name/id
-  matching takes precedence over role matching. Multiple instances with that role rotate among
-  themselves, an omitted contractor rotates through the whole roster, and an unknown selector
-  reports an error instead of silently reassigning the work.
+  matching takes precedence over role matching. An unknown selector reports an error instead of
+  silently reassigning the work.
+- **Omitting `contractor` picks by live load, not roster order.** Candidates with spare capacity
+  (running orders < that contractor's `maxParallel`) come first, then the least loaded one; a
+  rotation cursor only breaks ties. Load is **cross-session**: if another session already has
+  the first contractor busy, this session's orders go elsewhere instead of piling onto it. The
+  cursor persists in `<data dir>/rotate-cursors.json`, so restarting DSH continues where it left
+  off rather than snapping back to the first name.
+  So **omit `contractor` by default**; name someone only when that specific contractor must do
+  the work. Writing `contractor: "力工"` on every order bypasses load balancing, leaves the rest
+  of the roster idle and serializes the work — do that only when the roster really has a single
+  enabled contractor.
+- `foreman_roster` reports each contractor's **idle / running** state (cross-session), so you can
+  decide whether naming someone is worth it.
 - `orders[].dependsOn` only references orders in the same batch. An order becomes ready as soon
   as **all its dependencies complete successfully**; it does not wait for an entire dependency
   layer. Unrelated work still runs concurrently, up to the global default of **4** (maximum 8)
@@ -212,6 +224,27 @@ Known trade-offs:
 
 
 ## Changelog
+
+### 0.3.0 (2026-10-29)
+
+- **Load-aware dispatch**: omitting `contractor` no longer walks the roster in order. Candidates
+  with spare capacity (running orders < that contractor's `maxParallel`) come first, then the
+  least loaded one; a rotation cursor only breaks ties. Load is **cross-session** — when another
+  session already has a contractor busy, this session's orders go elsewhere instead of piling
+  onto the first name in the roster.
+- **Persisted rotation cursor**: the cursor moved out of `assignContractors`' local scope into
+  the engine instance and onto disk (`<data dir>/rotate-cursors.json`), fixing "every dispatch
+  starts at the first contractor" and surviving DSH restarts.
+- **`foreman_roster` shows busy/idle**: each contractor is labelled 「空闲 / 在跑 N 单」 from the
+  real cross-session state.
+- **Corrected tool and skill wording**: "omit `contractor` by default; name someone only when
+  that specific contractor must do the work." The old `foreman_dispatch` description pushed the
+  model to write `contractor: "力工"` explicitly, which bypassed load balancing entirely.
+- **Rework reuses the session**: a rework order continues in the existing contractor session
+  (`steer`/`submitPrompt` when the host exposes them, otherwise re-activating the same
+  `childId`) instead of spawning a fresh subagent and losing the member's context.
+- **Rework prompt carries the round number**: a sent-back order says 「本单第 N 轮提交」 so a
+  resumed session knows not to start over.
 
 ### 0.2.0 (2026-10-28)
 

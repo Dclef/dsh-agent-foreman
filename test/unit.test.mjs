@@ -18,7 +18,7 @@ import {
     normalizePolicy,
     resolveDataDir,
 } from '../lib/store.js';
-import { buildPrompt, extractText, layerOrders, normalizeOrders } from '../lib/engine.js';
+import { buildPrompt, extractText, layerOrders, normalizeOrders, ForemanEngine } from '../lib/engine.js';
 
 /** 造一个临时数据目录。 */
 function tempDir() {
@@ -173,4 +173,113 @@ test('ForemanError 带 code', () => {
     const error = new ForemanError('x', 'NOPE');
     assert.equal(error.code, 'NOPE');
     assert.ok(error instanceof Error);
+});
+
+/**
+ * 回归：不指定 contractor 时，轮转游标必须跨轮持续。
+ *
+ * 之前游标是 assignContractors 里的局部变量，每次 dispatch 都从 0 重新开始，
+ * 于是每一轮都命中名册第一个承包商——多个会话同时派单会一起抢同一个人，
+ * 其余承包商闲着（浪费额度且串行排队）。
+ */
+test('assignContractors：传入同一 cursors 时，连续两轮派单选到不同承包商', () => {
+    const members = [
+        { id: 'a', name: '甲', enabled: true, provider: 'p', model: 'm' },
+        { id: 'b', name: '乙', enabled: true, provider: 'p', model: 'm' },
+    ];
+    const cursors = new Map();
+    const first = ForemanEngine.assignContractors([{ id: 'W1', task: '一' }], members, cursors);
+    const second = ForemanEngine.assignContractors([{ id: 'W2', task: '二' }], members, cursors);
+    assert.equal(first[0].member.id, 'a');
+    assert.equal(second[0].member.id, 'b', '第二轮应该轮到下一个人，而不是又选中第一个');
+});
+
+test('assignContractors：不传 cursors 时仍向后兼容（每批从 0 开始）', () => {
+    const members = [
+        { id: 'a', name: '甲', enabled: true, provider: 'p', model: 'm' },
+        { id: 'b', name: '乙', enabled: true, provider: 'p', model: 'm' },
+    ];
+    const first = ForemanEngine.assignContractors([{ id: 'W1', task: '一' }], members);
+    assert.equal(first[0].member.id, 'a', '不传游标时保持旧行为，不破坏现有调用方');
+});
+
+/**
+ * 核心回归：别的会话已经让第一个人忙起来了，这一轮必须换人。
+ *
+ * 这正是用户报的问题——"默认只会用到第一个力工，我其它会话也在用它，于是
+ * 其它承包商全闲着"。负载来自 `countLoad`（跨会话，因为引擎是进程级单例），
+ * 光有轮转游标解决不了：游标只知道"第几次轮到谁"，不知道谁正在跑。
+ */
+test('assignContractors：在跑的人被跳过，活落到空闲的承包商身上', () => {
+    const members = [
+        { id: 'a', name: '力工', enabled: true, provider: 'p', model: 'm', maxParallel: 1 },
+        { id: 'b', name: '力工2', enabled: true, provider: 'p', model: 'm', maxParallel: 1 },
+    ];
+    // 另一个会话正让「力工」干活。
+    const load = new Map([['a', 1]]);
+    const [assigned] = ForemanEngine.assignContractors([{ id: 'W1', task: '一' }], members, new Map(), load);
+    assert.equal(assigned.member.id, 'b', 'a 已经满了，应该派给空闲的 b');
+});
+
+test('assignContractors：负载最小的优先，而不是名册顺序第一的人', () => {
+    const members = [
+        { id: 'a', name: '甲', enabled: true, provider: 'p', model: 'm', maxParallel: 2 },
+        { id: 'b', name: '乙', enabled: true, provider: 'p', model: 'm', maxParallel: 2 },
+        { id: 'c', name: '丙', enabled: true, provider: 'p', model: 'm', maxParallel: 2 },
+    ];
+    // 甲忙 1、乙忙 1、丙空着；游标又恰好指向 0（甲）。
+    const load = new Map([['a', 1], ['b', 1]]);
+    const cursors = new Map([['all', 0]]);
+    const [assigned] = ForemanEngine.assignContractors([{ id: 'W1', task: '一' }], members, cursors, load);
+    assert.equal(assigned.member.id, 'c', '应该挑负载最小的丙，而不是游标指向的甲');
+});
+
+test('assignContractors：同一批多张单不会全压给同一个人', () => {
+    const members = [
+        { id: 'a', name: '甲', enabled: true, provider: 'p', model: 'm', maxParallel: 1 },
+        { id: 'b', name: '乙', enabled: true, provider: 'p', model: 'm', maxParallel: 1 },
+    ];
+    const assigned = ForemanEngine.assignContractors([
+        { id: 'W1', task: '一' },
+        { id: 'W2', task: '二' },
+    ], members);
+    assert.deepEqual(assigned.map(order => order.member.id), ['a', 'b'], '本轮内的分配也要算进负载');
+});
+
+test('assignContractors：全员都满时仍然派（排队由调度器处理，不在这里拒绝）', () => {
+    const members = [
+        { id: 'a', name: '甲', enabled: true, provider: 'p', model: 'm', maxParallel: 1 },
+        { id: 'b', name: '乙', enabled: true, provider: 'p', model: 'm', maxParallel: 1 },
+    ];
+    const load = new Map([['a', 1], ['b', 1]]);
+    const [assigned] = ForemanEngine.assignContractors([{ id: 'W1', task: '一' }], members, new Map(), load);
+    assert.ok(['a', 'b'].includes(assigned.member.id), '满了也要给出一个人，排队交给调度器');
+});
+
+/**
+ * countLoad 的口径：只算 `running`。
+ *
+ * 把 queued 算进来会让"还没起跑"的单占住名额，把 done 算进来会让已经交活的
+ * 人永远显示为忙——两种都会让分配持续偏科。
+ */
+test('countLoad：只统计 running，跨会话累加', () => {
+    const runs = [
+        { orders: [{ status: 'running', member: { id: 'a' } }, { status: 'done', member: { id: 'a' } }] },
+        { orders: [{ status: 'running', member: { id: 'a' } }, { status: 'queued', member: { id: 'b' } }] },
+    ];
+    const load = ForemanEngine.countLoad(runs);
+    assert.equal(load.get('a'), 2, '两个会话各有一张在跑，累加为 2');
+    assert.equal(load.get('b'), undefined, 'queued 不算负载');
+});
+
+test('rotate-cursors：能落盘并读回（重启后继续轮转，不回到第一个人）', () => {
+    const dir = tempDir();
+    const store = new ForemanStore(dir);
+    assert.equal(store.readRotateCursors().size, 0, '没有文件时是空 Map');
+
+    const cursors = new Map([['all', 3], ['role:力工', 1]]);
+    assert.equal(store.writeRotateCursors(cursors), true);
+    const back = new ForemanStore(dir).readRotateCursors();
+    assert.equal(back.get('all'), 3);
+    assert.equal(back.get('role:力工'), 1);
 });

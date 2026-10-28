@@ -380,3 +380,66 @@ test('成环仍然由 layerOrders 拒绝', async () => {
     assert.equal(error.code, 'CYCLIC_DEPENDENCY');
     assert.equal(host.activations.length, 0, '成环不该派出任何单');
 });
+
+/**
+ * 端到端复现用户报的问题：两个会话共用一个名册，默认都不写 contractor。
+ *
+ * 之前：每个会话的 dispatch 各自从名册第 0 位开始轮，于是两个会话的活都压给
+ * 「a」，其余承包商全闲着——额度浪费、活串行排队。
+ * 现在：负载跨会话可见（引擎是进程级单例，this.runs 里躺着所有会话的看板），
+ * 会话 B 派单时会跳过正被会话 A 占着的 a，自动落到 b 身上。
+ */
+test('跨会话负载：A 正占着力工时，B 派单自动换人', async () => {
+    // 同一个引擎实例 = 同一个进程里的两个会话。
+    const host = createHost({
+        members: [member('a'), member('b')],
+        policy: { ...POLICY, concurrency: 2 },
+    });
+    // 会话 A 派一张单，不写 contractor，按负载挑 → a（两人都空，游标从头）。
+    const runA = host.dispatch([order('A1')], { sessionId: 'session-A' });
+    const activeA = await host.waitFor('A1');
+    assert.match(activeA.label, /^A1/);
+
+    // 会话 B 也派一张，同样不写 contractor。此时 a 正忙，必须换 b。
+    const runB = host.dispatch([order('B1')], { sessionId: 'session-B' });
+    const activeB = await host.waitFor('B1');
+
+    // 两张单同时在跑（并发 2），但落在不同的人身上——这是本用例的核心。
+    host.settle('A1', { text: 'A 做完' });
+    host.settle('B1', { text: 'B 做完' });
+    const [doneA, doneB] = await Promise.all([runA, runB]);
+
+    const contractorA = byId(doneA).get('A1').contractorName;
+    const contractorB = byId(doneB).get('B1').contractorName;
+    assert.notEqual(contractorA, contractorB, '两个会话的活不该都压给同一个人');
+    assert.equal(contractorA, 'a');
+    assert.equal(contractorB, 'b', 'a 已经被会话 A 占着，B 应该落到 b 身上');
+});
+
+/**
+ * 单人名册的兜底语义：负载感知**不能**变成"忙就拒绝派单"。
+ *
+ * 名册里只有一个人时，负载判断仍然要给出他（{@link ForemanEngine.assignContractors}
+ * 的"全员都满也照派"分支），排队交给各自的调度器。跨会话的并发隔离发生在
+ * **宿主**那一层（`maxActiveSubagents`），本插件不去冒充那道闸——否则第二张单
+ * 会被无声地吞掉，父模型却以为派出去了。
+ */
+test('跨会话负载：单人名册照常派出，不会因为对方正忙而拒绝', async () => {
+    const host = createHost({
+        members: [member('a')],
+        policy: { ...POLICY, concurrency: 2 },
+    });
+    const runA = host.dispatch([order('A1')], { sessionId: 'session-A' });
+    await host.waitFor('A1');
+    const runB = host.dispatch([order('B1')], { sessionId: 'session-B' });
+    // 只有一个人，但两张单都必须真的派出去——不拒绝、不静默丢弃。
+    await host.waitFor('B1');
+
+    host.settle('A1', { text: 'A 做完' });
+    host.settle('B1', { text: 'B 做完' });
+    const [doneA, doneB] = await Promise.all([runA, runB]);
+    assert.equal(byId(doneA).get('A1').contractorName, 'a');
+    assert.equal(byId(doneB).get('B1').contractorName, 'a');
+    assert.equal(byId(doneA).get('A1').status, 'done');
+    assert.equal(byId(doneB).get('B1').status, 'done');
+});
