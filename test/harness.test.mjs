@@ -7,6 +7,7 @@
  * 这些真实代码都会被跑到——包括跨站防护和错误翻译。
  */
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -93,14 +94,19 @@ function createHost({ members = [], text = '交付摘要：做完了', stopReaso
                     { type: 'user/message', data: { message: { content: [{ type: 'text', text: '待命。' }] } } },
                     { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '待命。' }] } } },
                 ]);
-                teamSessions.set(sessionId, { snapshotEvents: () => teamEvents.get(sessionId) ?? [] });
+                const activation = await this.roster.ctx.subagents.startActivation({
+                    delivery: 'parent', childId: sessionId, provider: options.provider,
+                    request: { parent, prompt: options.prompt }, signal: options.signal,
+                });
+                const header = options.routeForTest ?? activations.at(-1)?.request?.agentOptions;
+                teamSessions.set(sessionId, { header, snapshotEvents: () => teamEvents.get(sessionId) ?? [] });
                 // 真宿主在 spawn 之后要等初始 prompt 被接受，成员才从 provisioning
                 // 走到 active；这里直接给 active，等价于"握手已完成"。
                 agentStatus.set(sessionId, 'inactive');
                 teamNames.set(options.name, sessionId);
                 // 关键：新成员必须出现在 listMembers 里，否则插件的"等成员 active
                 // 再投递"只能空等到超时，然后退回普通模式——那是替身失真，不是产品行为。
-                teamRoster.push({ id: sessionId, name: options.name, role: 'teammate', status: 'inactive' });
+                teamRoster.push({ id: sessionId, name: options.name, role: 'teammate', status: 'inactive', model: header?.model });
                 return { member: { id: sessionId, name: options.name } };
             },
             listMembers(parent) {
@@ -137,6 +143,7 @@ function createHost({ members = [], text = '交付摘要：做完了', stopReaso
             },
         }
         : undefined;
+    if (agentTeams) agentTeams.roster = { ctx: { subagents }, async spawn() {} };
     // 真实宿主里活 agent 同时带 `session`：团队成员是子智能体会话，
     // `sessions.get` 查不到它，插件靠 agents 这条通道读事件与正文。
     // 少了这个字段，团队模式会误判"读不到会话"而退回普通模式。
@@ -235,6 +242,9 @@ function createHost({ members = [], text = '交付摘要：做完了', stopReaso
         },
     };
 
+    // Non-team tests explicitly exercise standalone mode; production defaults
+    // remain teamMode:true and missing native services must not be hidden.
+    fs.writeFileSync(path.join(dataDir, 'roster.json'), JSON.stringify({ members: [], policy: { teamMode: team } }));
     apply(ctx, { ...Config({}), dataDir, members });
     /** 放行所有挂起的假子智能体（`hold` 模式用）。 */
     const releaseAll = () => {
@@ -374,7 +384,7 @@ test('foreman_dispatch：两张工单都跑完，看板带产物与路由', asyn
     assert.equal(result.orders[0].status, 'done');
 });
 
-test('自建成员模式：startActivation 锁定模型，共享任务进团队面板', async () => {
+test('原生团队：创建真实队友并在首轮锁定模型，共享任务进团队面板', async () => {
     const host = createHost({
         team: true,
         teamText: '自建成员交付',
@@ -394,7 +404,7 @@ test('自建成员模式：startActivation 锁定模型，共享任务进团队�
     assert.equal(result.ok, true);
     // 自建成员走 startActivation（不再 spawnTeammate）。
     assert.equal(host.activations.length, 1, '应通过 startActivation 创建子智能体');
-    assert.equal(host.teamSpawned.length, 0, '不再走 spawnTeammate');
+    assert.equal(host.teamSpawned.length, 1, '必须创建真实原生队友');
     // agentOptions 锁定模型。
     const opts = host.activations[0]?.request?.agentOptions;
     assert.ok(opts !== undefined, 'agentOptions 应注入');
@@ -403,11 +413,14 @@ test('自建成员模式：startActivation 锁定模型，共享任务进团队�
     // 共享任务进团队面板。
     assert.deepEqual(host.teamTasks.map(entry => entry.step), ['create', 'reassign', 'complete']);
     assert.match(host.teamTasks[0].request.subject, /W1/);
-    assert.match(result.orders[0].teamMode, /自建成员/);
+    assert.match(result.orders[0].teamMode, /原生团队成员/);
+    assert.equal(result.orders[0].actualRoute, 'deepseek-official/deepseek-flash');
+    assert.equal(host.teamSpawned.length, 1);
+    assert.equal(host.teamModels.length, 0, '不切换忙碌会话，也不修改全局默认模型');
     assert.equal(result.orders[0].status, 'done');
 });
 
-test('团队模式：宿主没有 agentTeams 时安静退回普通激活', async () => {
+test('团队模式：宿主没有 agentTeams 时明确失败，不用普通激活冒充原生团队', async () => {
     const host = createHost({
         members: [{ name: '力工', provider: 'deepseek-official', model: 'deepseek-flash' }],
     });
@@ -421,9 +434,10 @@ test('团队模式：宿主没有 agentTeams 时安静退回普通激活', async
         orders: [{ id: 'W1', title: '连线', task: '把连线改成曲线' }],
     }, execOf());
 
-    assert.equal(result.ok, true);
-    assert.equal(host.activations.length, 1);
-    assert.equal(result.orders[0].status, 'done');
+    assert.equal(result.ok, true); // Tool call succeeded; the order failed visibly.
+    assert.equal(host.activations.length, 0);
+    assert.equal(result.orders[0].status, 'failed');
+    assert.match(result.orders[0].error, /原生团队服务不可用/);
 });
 
 test('foreman_dispatch：承包商名字不在名册里时明确报错', async () => {
@@ -832,8 +846,8 @@ test('/foreman：没有 commands 服务时退回 skill，且 source 是字符串
 test('团队模式：上一轮建的成员还在名册里时复用，不再 spawn', async () => {
     const host = createHost({
         team: true,
-        teamMembers: [{ id: 'team-old', name: 'w1', role: 'teammate', status: 'idle' }],
-        members: [{ id: 'w1', name: '力工', provider: 'deepseek-official', model: 'deepseek-flash' }],
+        teamMembers: [{ id: 'team-old', name: 'w1-' + createHash('sha256').update(JSON.stringify(['w1', '', '', ''])).digest('hex').slice(0, 16), role: 'teammate', status: 'idle' }],
+        members: [{ id: 'w1', name: '力工', provider: '', model: '' }],
     });
     await call(host, '/plugins/dsh-agent-foreman/api/policy', {
         method: 'POST',
@@ -848,7 +862,7 @@ test('团队模式：上一轮建的成员还在名册里时复用，不再 spaw
     ]);
     // 自建成员模式：不走 spawnTeammate，改走 startActivation + agentOptions。
     assert.equal(host.teamSpawned.length, 0, '不再走 spawnTeammate');
-    assert.equal(host.activations.length, 1, '应通过 startActivation 创建子智能体');
-    assert.ok(host.activations[0]?.request?.agentOptions, 'agentOptions 应注入');
+    assert.equal(host.activations.length, 0, '原生成员只通过消息续写');
+    assert.equal(host.teamSent.length, 1);
     assert.equal(result.ok, true);
 });

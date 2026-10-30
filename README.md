@@ -3,7 +3,9 @@
 > Parent agent dispatches, sub-agents do the work, the parent reviews.
 > No preset roles, no scripted phases: **you decide who works and with which model**.
 
-Chinese docs: [README.zh.md](README.zh.md)
+Chinese docs: [README.zh.md](README.zh.md) · [Install / upgrade](docs/INSTALL.md)
+
+**Latest release: v0.4.0 (2026-10-31)** — native mixed-model teammates and a responsive roster editor.
 
 ## The problem
 
@@ -17,9 +19,9 @@ Foreman splits it in two:
   construction site: 力工 (laborer — does the business work) and, optionally, 安全员 (safety officer
   — reviews and rejects). The foreman itself is the parent agent: it splits the work and signs off,
   and is never in the roster. Want specialties? **Hire several instances** (力工 · frontend,
-  力工 · render), each with its own model and **its own prompt** (the 👁 button next to the name),
-  and its own concurrency cap: default 1, so one instance never works two orders at once; set it to
-  2 and it can. That prompt is prepended to every order the contractor receives. **The minimal setup
+  力工 · render), each with its own model and **its own prompt** (the Edit prompt button),
+  and its own ordinary-mode concurrency cap (default 1). Native team mode always serializes
+  one member’s inbox; use additional members for independent parallel work. That prompt is prepended to every order the contractor receives. **The minimal setup
   is a single 力工.**
 - **Orders** — the work the parent agent splits out. Each order carries a task and acceptance
   criteria, and may name a contractor or leave it out to be picked by live load (busy contractors
@@ -44,7 +46,7 @@ Then open **Settings → 包工头** and add contractors.
 
 ## Usage
 
-![Settings → 包工头: the contractor roster, with a per-contractor prompt behind the eye button](docs/settings-roster.png)
+![Settings → 包工头: responsive contractor groups with readable models and Edit prompt controls](docs/settings-roster.png)
 
 Type `/foreman` (registered at runtime through `ctx.skills.register()`) followed by the work:
 `/foreman extract GraphBlocked into shared logic; add regression tests`. Semicolons or newlines
@@ -80,8 +82,9 @@ Roster notes:
   the parent session is using.**
 - To use a different model: pick the provider first — **the model dropdown is derived from it** and
   only lists that provider's models (providers with no models never show up).
-- Settings page collapses policy behind "派单策略"; the roster table keeps name / provider / model /
-  effort / concurrency / enabled, and 👁 opens that contractor's prompt editor.
+- Settings page collapses policy behind "派单策略". Each contractor has a responsive group with
+  readable model/effort controls, a full configured-route summary and an Edit prompt button.
+  The header popover stays inside the viewport and distinguishes configured from observed models.
 
 ### The roster *is* the whitelist
 
@@ -195,35 +198,52 @@ projects; Foreman focuses on **model-based dispatch and per-order review** with 
 
 ## Team mode (experimental)
 
-Off by default. Tick **团队模式** under Settings → 包工头 → 派单策略 and each
-contractor becomes a real member of the host's **agent team**: the plugin spawns
-it with `agentTeams.spawnTeammate`, switches its session model with
-`sessionController.selectModel`, sends the work order as a team message, then reads the
-delivery back from the member's session events.
+Enabled for new configurations; saved policies are preserved. Enable **团队模式** in
+Settings → 包工头 → 派单策略, then select each contractor's own provider, model and
+optional reasoning effort. Members are created through native `agentTeams.spawnTeammate`,
+not standalone activations presented as team members.
 
-Members therefore show up in the team area and can change model in their own
-session. Every step depends on host team services, so **any failure falls back to
-the plain activation path** and the board's `teamMode` field says which one ran.
+The current host does not publicly forward model options. A guarded **per-call** service
+adapter adds `request.agentOptions` to the native reserved-child activation. This preserves
+real roster membership and creation-time routing, including the first request and durable
+child descriptor. It never replaces a global method, changes the parent/default model, or
+modifies the host ASAR. An offline contract test runs against the installed DSH
+`0.2.1-rc.5` TeamService/TeamRoster source. Internal shape changes fail visibly; arbitrary
+future host versions are not guaranteed compatible.
 
-**Why delivery waits for `active`**: the host's `sendMessage` throws
-`active teammate "worker" not found` until the member leaves `provisioning` and becomes
-`active`. The plugin therefore polls `listMembers()` before delivering; if the member never
-gets there (or reports `failed`), it falls back to the plain path instead of surfacing an error.
-Known trade-offs:
+Before work is sent, the handshake completes and actual request configuration is verified.
+Work and rework use native team messages and the same member Session. Reports carry
+run/attempt tokens; session-text recovery waits for the member turn to stop.
 
-- Member names must be ASCII (`lower-kebab-case`), so Chinese contractor names all
-  become `worker`, `worker-2`, … — the Chinese name and model live in the member
-  description, which the team area shows.
-- A member's first turn runs on the parent's model (`spawnTeammate` accepts no model field —
-  hence the one-line handshake).
-- The member's **actual** model is echoed by `listMembers()`, written into the board's
-  `teamMode` note; if the roster model differs it is shown side by side.
-- Switching is bounded by the host's per-subagent model allow-list; values outside
-  it are refused and the board shows `model switch: failed · reason`.
-- Members stay in the team after the round.
-
+- Different members run in parallel; work for **one** native member is serialized, even if
+  its ordinary-mode maxParallel is higher. Add roster members for independent parallel work.
+- Names contain stable contractor-and-route fingerprints. Original names remain in descriptions.
+- No silent fallback to parent models or standalone children. Disable team mode explicitly
+  if ordinary subagents are desired.
+- Timeouts settle promptly; unconfirmed cleanup quarantines the member instead of reusing it.
+- Dormant native roster labels may fall back to the parent's model; request records, not
+  those display labels, are the authoritative route evidence.
+- Restart DSH after updating the locally installed host plugin; refreshing the page is insufficient.
 
 ## Changelog
+
+### 0.4.0 (2026-10-31)
+
+- **Real native mixed-model teammates**: a guarded per-call TeamService/TeamRoster adapter
+  registers real teammates and assigns provider/model/effort at creation. No global model changes.
+- **Verified routing**: check actual request configuration before delivering work; host incompatibility
+  or model mismatch fails visibly instead of falling back to the parent or a substitute session.
+  The internal bridge is verified against DSH 0.2.1-rc.5, not guaranteed for arbitrary host versions.
+- **Safer delivery**: per-member serialization, completed-turn text recovery, attempt-scoped report
+  tokens, stable route fingerprints and timeout quarantine protect against stale or mixed output.
+- **Responsive settings**: contractor groups replace cramped table columns, with full configured
+  routes and readable model, concurrency and prompt controls from 320 to 1100 pixels.
+- **Worksite panel**: top-layer placement avoids sidebar clipping; loaded-runtime markers and
+  configured/observed model labels make stale host code visible.
+- **Validation**: 151 tests pass with installed-host contracts and Chrome browser checks enabled.
+  Live native calls verified TRAE, WorkBuddy and Qoder; Qoder Global/gfmodel returned an upstream
+  RESOURCE_LIMIT queue error and did not produce a successful model response.
+- **Upgrade**: fully restart DSH after installation; a browser refresh alone is insufficient.
 
 ### 0.3.0 (2026-10-29)
 

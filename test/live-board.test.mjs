@@ -212,6 +212,16 @@ test('/api/state：engine 没有 latestRun 能力时 latestRunId 为空串', asy
     assert.equal(body.ok, true);
 });
 
+test('/api/state 与 /api/live 返回内存中加载的原生编队构建标识', async () => {
+    const { routes } = mountFake();
+    for (const endpoint of ['/api/state', '/api/live']) {
+        const body = await callJson(routes, ROUTE_PREFIX + endpoint);
+        assert.equal(body.runtime.execution, 'native-roster');
+        assert.equal(body.runtime.build, 'native-team-v2-20261030');
+        assert.ok(Number.isFinite(Date.parse(body.runtime.loadedAt)));
+    }
+});
+
 test('page：含实时工地区块的关键文案', () => {
     const html = renderPage();
     assert.match(html, /实时工地/);
@@ -224,6 +234,19 @@ test('page：含实时工地区块的关键文案', () => {
     assert.match(html, /2500/);
     // 新区块要排在「最近派单」之前
     assert.ok(html.indexOf('实时工地') < html.indexOf('最近派单'), '实时工地应插在最近派单之前');
+});
+
+test('page：名册使用响应式分行布局，保留模型全名与可读并发输入', () => {
+    const html = renderPage();
+    assert.ok(html.includes('id="roster" class="roster-list"'));
+    assert.ok(!html.includes('<tbody id="roster">'));
+    assert.ok(html.includes("row.className = 'contractor'"));
+    assert.ok(html.includes("field('并发', 'parallel', parallel)"));
+    assert.ok(html.includes("control.setAttribute('aria-label', label)"));
+    assert.ok(html.includes('min-width: 64px'));
+    assert.ok(html.includes('contractor-route'));
+    assert.ok(html.includes('编辑提示词'));
+    assert.ok(html.includes("effortRequest"));
 });
 
 test('page：内联脚本能被 new Function 解析（防模板拼错）', () => {

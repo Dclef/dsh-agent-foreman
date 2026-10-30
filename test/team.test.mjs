@@ -39,26 +39,17 @@ function fakeHost(opts = {}) {
     ];
 
     const teams = {
-        spawnTeammate: async (_parent, request) => {
+        spawnTeammate: async function (_parent, request) {
             log.push('spawn');
             spawned = true;
             spawnedName = typeof request?.name === 'string' ? request.name : 'worker';
             sessions.set('s1', { snapshotEvents: () => events });
-            // 真实宿主：spawnTeammate 内部调 subagents.startActivation 创建子会话。
-            // 这一步让拦截注入有机会生效（插件会临时 patch startActivation 注入 agentOptions）。
-            const subagents = ctx.get('subagents');
-            if (subagents && typeof subagents.startActivation === 'function') {
-                try {
-                    await subagents.startActivation({
-                        delivery: 'parent',
-                        childId: 's1',
-                        provider: 'spawn',
-                        request: { prompt: request.prompt, parent: _parent },
-                        signal: request.signal,
-                    });
-                }
-                catch { /* 假 startActivation 失败不影响 spawn 结果 */ }
-            }
+            const activation = await this.roster.ctx.subagents.startActivation({
+                delivery: 'parent', childId: 's1', provider: request.provider,
+                request: { prompt: request.prompt, parent: _parent }, signal: request.signal,
+            });
+            const header = opts.actualRoute ?? activation?.route;
+            if (header) sessions.get('s1').header = header;
             return { member: { id: 's1', name: spawnedName } };
         },
         listMembers: () => {
@@ -117,6 +108,15 @@ function fakeHost(opts = {}) {
             return undefined;
         },
     };
+    const baseSubagents = {
+        async startActivation(spec) {
+            return { route: spec.request.agentOptions, childId: spec.childId };
+        },
+    };
+    teams.roster = {
+        ctx: { get subagents() { return ctx.get('subagents') ?? baseSubagents; } },
+        async spawn() {},
+    };
     ctx.root = ctx;
     return { ctx, teams, log, teamsReads: () => reads };
 }
@@ -141,6 +141,32 @@ function order(overrides = {}) {
 }
 
 const POLICY = { timeoutSeconds: 5 };
+
+test('团队模式：宿主有 subagents 时仍创建原生队友，不用自建会话冒充团队成员', async () => {
+    const captured = [];
+    const host = fakeHost({
+        memberRow: (_read, spawned, name) => spawned
+            ? { id: 's1', name, role: 'teammate', status: 'idle', model: 'm' }
+            : undefined,
+    });
+    const subagents = {
+        providers: new Map([['spawn', {}]]),
+        async startActivation(spec) {
+            captured.push(spec);
+            return { childId: 's1', result: Promise.resolve({ output: [{ type: 'text', text: 'standalone' }] }), dispose: async () => {} };
+        },
+    };
+    const originalGet = host.ctx.get;
+    host.ctx.get = name => name === 'subagents' ? subagents : originalGet(name);
+    const runner = createTeamRunner({ ctx: host.ctx, activeTimeoutMs: 1000 });
+    const result = await runner.dispatch({
+        order: order({ member: member({ provider: '', model: '' }) }),
+        parent: { id: 'lead' }, prompt: '干活', policy: POLICY,
+    });
+    assert.equal(result.ok, true);
+    assert.ok(host.log.includes('spawn'), '必须通过 agentTeams.spawnTeammate 登记真实队友');
+    assert.equal(captured.some(spec => spec.delivery === 'caller'), false, '不得直接启动独立会话冒充团队');
+});
 
 test('dispatch：成员前两次 provisioning，第三次才 active——必须先等到第三次才发消息', async () => {
     const log = [];
@@ -233,8 +259,9 @@ test('dispatch：成员 status=failed 直接判失败，reason 带出 diagnostic
     assert.equal(log.includes('send'), false);
 });
 
-test('dispatch：note 带宿主回显的实际模型；名册配 m 而成员跑 n 时报不一致', async () => {
+test('dispatch：实际模型与名册不同时拒绝投递，不悄悄继承父模型', async () => {
     const host = fakeHost({
+        actualRoute: { provider: 'p', model: 'n' },
         memberRow: (read, spawned, name) => (spawned
             ? { id: 's1', name, role: 'teammate', status: 'idle', model: 'n' }
             : undefined),
@@ -247,12 +274,9 @@ test('dispatch：note 带宿主回显的实际模型；名册配 m 而成员跑 
         policy: POLICY,
     });
 
-    assert.equal(result.ok, true);
-    assert.equal(result.actualModel, 'n');
-    assert.equal(result.text, '干完了');
-    assert.match(result.note, /实际模型 n/);
-    assert.match(result.note, /不一致/);
-    assert.match(result.note, /名册配 m/);
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /模型路由未匹配/);
+    assert.equal(host.log.includes('send'), false);
 });
 
 test('dispatch：名册为空（跟随父会话）时只报实际模型、不报不一致', async () => {
@@ -284,7 +308,7 @@ test('dispatch：名册为空（跟随父会话）时只报实际模型、不报
  *
  * 现在的判定是「先看有没有正文」：正文已经写进会话就先收活，不看状态。
  */
-test('dispatch：成员已回正文、宿主仍报 running——必须直接收活，不能等到超时', async () => {
+test('dispatch：成员尚在 running 时不把中间正文误当最终交付', async () => {
     const host = fakeHost({
         // 关键：状态永远 running，模拟宿主状态刷新滞后。
         agentsStatus: 'running',
@@ -299,14 +323,13 @@ test('dispatch：成员已回正文、宿主仍报 running——必须直接收�
         order: order(),
         parent: { id: 'lead' },
         prompt: '干活',
-        policy: { timeoutSeconds: 30 },
+        policy: { timeoutSeconds: 0.05 },
     });
     const elapsed = Date.now() - startedAt;
 
-    assert.equal(result.ok, true, '有正文就该收活，不该因为状态还是 running 而失败');
-    assert.match(result.text, /TM_OK 干完了/);
-    // 状态一直是 running，旧实现会等满 30 秒 timeout；新实现应在第一次轮询就收活。
-    assert.ok(elapsed < 5000, `不该等满超时，实际耗时 ${elapsed}ms`);
+    assert.equal(result.ok, false, '成员仍在 running 时中间正文不应被当成最终交付');
+    assert.match(result.reason, /超时/);
+    assert.ok(elapsed < 1000, `硬超时必须按时返回，实际耗时 ${elapsed}ms`);
 });
 
 /**
@@ -368,7 +391,7 @@ test('dispatch：读不到会话与状态时，等自报通道；无自报则超
     const runner = createTeamRunner({ ctx: host.ctx, activeTimeoutMs: 2000 });
     const startedAt = Date.now();
     const result = await runner.dispatch({
-        order: order(),
+        order: order({ member: member({ provider: '', model: '' }) }),
         parent: { id: 'lead' },
         prompt: '干活',
         policy: { timeoutSeconds: 3 },
@@ -389,7 +412,7 @@ test('dispatch：读不到会话与状态时，等自报通道；无自报则超
  * 插件自己的存储。线上已验证承包商会调用 foreman_report，产物落进 order.reportOutput。
  */
 test('dispatch：读不到会话时，靠 foreman_report 自报收活', async () => {
-    const work = order();
+    const work = order({ member: member({ provider: '', model: '' }) });
     const host = fakeHost({
         sessionMissing: true,
         agentsStatus: undefined,
@@ -493,267 +516,59 @@ test('dispatch：握手回复晚到时，不能被当成本单产物交回', asy
     assert.doesNotMatch(result.text, /HANDSHAKE_REPLY_EARLY/, '绝不能把握手回复当成本单产物');
 });
 
-/**
- * 模型拦截注入：spawnTeammate 不接受 model 字段，但它内部调用
- * `subagents.startActivation({ request })`。我们临时拦截该调用，把名册的
- * agentOptions 注入进去——成员创建时就锁定正确模型，同时保留团队成员身份。
- *
- * 这是「先拦截再分发」：解决团队模式"分配不了模型"的根因。
- */
-test('spawnTeammate 期间拦截 startActivation，把名册模型注入 agentOptions', async () => {
-    const injected = [];
-    const subagents = {
-        providers: new Map([['spawn', {}]]),
-        async startActivation(spec) {
-            injected.push(spec?.request?.agentOptions);
-            return { childId: 'c1', result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }, ), dispose: async () => {} };
-        },
-    };
-    const host = fakeHost({
-        memberRow: (read, spawned, name) => (spawned
-            ? { id: 's1', name, role: 'teammate', status: 'idle', model: 'm' }
-            : undefined),
-    });
-    const baseGet = host.ctx.get.bind(host.ctx);
-    host.ctx.get = (name) => (name === 'subagents' ? subagents : baseGet(name));
-
-    const runner = createTeamRunner({ ctx: host.ctx, activeTimeoutMs: 2000 });
-    await runner.dispatch({
-        order: order({ member: member({ provider: 'trae', model: 'glm-5.3-flash', reasoningEffort: 'high' }) }),
-        parent: { id: 'lead' },
-        prompt: '干活',
-        policy: { timeoutSeconds: 10 },
-    });
-
-    // spawnTeammate 内部调了 subagents.startActivation，拦截器注入了 agentOptions。
-    assert.ok(injected.length > 0, 'spawnTeammate 应内部调用 startActivation');
-    const opts = injected[0];
-    assert.ok(opts !== undefined, '拦截器应注入 agentOptions');
-    assert.equal(opts.provider, 'trae', 'provider 应来自名册');
-    assert.equal(opts.model, 'glm-5.3-flash', 'model 应来自名册');
-    assert.equal(opts.reasoningEffort, 'high', 'reasoningEffort 应来自名册');
-    // 拦截器用完应还原。
-    assert.notEqual(subagents.startActivation.name, 'interceptedStartActivation', '拦截器用完应还原成原函数');
-});
-
-/**
- * 自建成员：startActivation + agentOptions 锁定模型，delivery:'caller' 同步回收。
- *
- * 仿 agent-teams 但带模型可选——不靠 spawnTeammate（无法指定模型），
- * 不靠事后 selectModel（被 agent-busy 拒绝）。
- */
-test('dispatchViaActivation：agentOptions 锁定模型，result 同步回收', async () => {
+test('原生建队：创建时注入名册模型、推理等级和深度，原方法从未被替换', async () => {
     const captured = [];
-    const subagents = {
-        providers: new Map([['spawn', {}]]),
-        async startActivation(spec) {
-            captured.push(spec);
-            return {
-                childId: 'child-1',
-                result: Promise.resolve({ output: [{ type: 'text', text: '自建成员交付' }], stopReason: 'completed' }),
-                dispose: async () => {},
-            };
-        },
-    };
-    const host = fakeHost({
-        memberRow: (read, spawned, name) => (spawned
-            ? { id: 's1', name, role: 'teammate', status: 'idle', model: 'm' }
-            : undefined),
-    });
-    const baseGet = host.ctx.get.bind(host.ctx);
-    host.ctx.get = (name) => (name === 'subagents' ? subagents : baseGet(name));
-
-    const runner = createTeamRunner({ ctx: host.ctx, activeTimeoutMs: 2000 });
+    const subagents = { providers: new Map([['spawn', {}]]), async startActivation(spec) {
+        captured.push(spec);
+        assert.strictEqual(subagents.startActivation, original);
+        return { childId: spec.childId, route: spec.request.agentOptions };
+    } };
+    const original = subagents.startActivation;
+    const host = fakeHost({ memberRow: (_r, spawned, name) => spawned
+        ? { id: 's1', name, role: 'teammate', status: 'idle' } : undefined });
+    const get = host.ctx.get;
+    host.ctx.get = name => name === 'subagents' ? subagents : get(name);
+    const runner = createTeamRunner({ ctx: host.ctx });
     const result = await runner.dispatch({
-        order: order({ member: member({ provider: 'qoder', model: 'mmodel', reasoningEffort: 'max' }) }),
-        parent: { id: 'lead' },
-        prompt: '干活',
-        policy: { timeoutSeconds: 10, provider: 'spawn', maxDepth: 1 },
+        order: order({ member: member({ provider: 'p1', model: 'm1', reasoningEffort: 'high' }) }),
+        parent: { id: 'lead' }, prompt: 'work', policy: { timeoutSeconds: 3, maxDepth: 2 },
     });
-
-    assert.equal(result.ok, true, '自建成员应成功收活');
-    assert.equal(result.text, '自建成员交付', '产物来自 result');
-    // 模型通过 agentOptions 锁定。
-    assert.equal(captured.length, 1, '应调用一次 startActivation');
-    const opts = captured[0]?.request?.agentOptions;
-    assert.ok(opts !== undefined, 'agentOptions 应注入');
-    assert.equal(opts.provider, 'qoder', 'provider 应来自名册');
-    assert.equal(opts.model, 'mmodel', 'model 应来自名册');
-    assert.equal(opts.reasoningEffort, 'max', 'reasoningEffort 应来自名册');
-    assert.match(result.note, /自建成员/, 'note 应写明自建成员');
+    assert.equal(result.ok, true);
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].delivery, 'parent');
+    assert.deepEqual(captured[0].request.agentOptions, { provider: 'p1', model: 'm1', reasoningEffort: 'high' });
+    assert.equal(captured[0].request.maxDepth, 2);
+    assert.strictEqual(subagents.startActivation, original);
+    assert.match(result.note, /原生团队成员/);
 });
 
-/**
- * 返工复用（核心目标）：同一名册成员的 sessionId 已缓存时，返工**不再新建
- * 子智能体**——宿主没有高级续写通道时，退回「重激活同一个 childId」，即
- * `startActivation` 收到与首单相同的 childId，而不是开一个全新的子会话。
- *
- * 这修复了一个真实缺陷：所有派单路径（含返工）都走 startActivation 开新
- * 子智能体，成员每打回一次就换一个新会话、丢掉上一轮的上下文与身份。
- * 现在首单记录缓存，返工在原地续写。
- */
-test('dispatchViaActivation：返工复用缓存的 sessionId，不再新建子智能体', async () => {
-    const captured = [];
-    const subagents = {
-        providers: new Map([['spawn', {}]]),
-        async startActivation(spec) {
-            captured.push(spec);
-            const childId = spec?.childId ?? `child-${captured.length}`;
-            return {
-                childId,
-                result: Promise.resolve({ output: [{ type: 'text', text: `交付-${captured.length}` }], stopReason: 'completed' }),
-                dispose: async () => {},
-            };
-        },
-    };
-    const host = fakeHost({
-        memberRow: (read, spawned, name) => (spawned
-            ? { id: 's1', name, role: 'teammate', status: 'idle', model: 'm' }
-            : undefined),
-    });
-    const baseGet = host.ctx.get.bind(host.ctx);
-    host.ctx.get = (name) => (name === 'subagents' ? subagents : baseGet(name));
-
-    const runner = createTeamRunner({ ctx: host.ctx, activeTimeoutMs: 2000 });
-    // 第 1 单：创建成员。
-    const first = await runner.dispatch({
-        order: order({ member: member({ provider: 'qoder', model: 'mmodel' }) }),
-        parent: { id: 'lead' },
-        prompt: '干活',
-        policy: { timeoutSeconds: 10, provider: 'spawn', maxDepth: 1 },
-    });
-    assert.equal(first.ok, true);
-    assert.equal(captured.length, 1, '首单应创建一次子智能体');
-    const firstChildId = first.sessionId;
-    assert.equal(typeof firstChildId, 'string');
-    assert.equal(firstChildId, 'child-1');
-
-    // 同一名的返工单：宿主没有 submitPrompt/steer → 走重激活同一个 childId。
-    const second = await runner.dispatch({
-        order: order({ id: 'W1', member: member({ id: 'coder-a', provider: 'qoder', model: 'mmodel' }) }),
-        parent: { id: 'lead' },
-        prompt: '上一轮被打回 缺回归测试',
-        policy: { timeoutSeconds: 10, provider: 'spawn', maxDepth: 1 },
-    });
-    assert.equal(second.ok, true);
-    assert.equal(captured.length, 2, '返工仍走 startActivation（reactivate 兜底）');
-    // 关键断言：第二次激活携带与首单相同的 childId，而不是新会话。
-    assert.equal(captured[1].childId, firstChildId, '返工必须复用同一 childId');
-    assert.equal(captured[1].request?.sessionId, firstChildId, 'request.sessionId 也要指向同一会话');
-    // 返工不再新建成员缓存条目，note 里写明复用。
-    assert.equal(second.sessionId, firstChildId, '产物仍回到同一会话');
-    assert.match(second.note, /返工·复用会话/, 'note 应如实写明返工复用会话');
-    assert.equal(second.text, '交付-2');
+test('原生队友返工：同一团队与名册路由复用同一成员，通过消息续写不重新激活', async () => {
+    const host = fakeHost({ memberRow: (_r, spawned, name) => spawned
+        ? { id: 's1', name, role: 'teammate', status: 'idle', model: 'm' } : undefined });
+    const runner = createTeamRunner({ ctx: host.ctx });
+    const parent = { id: 'lead' };
+    const first = await runner.dispatch({ order: order(), parent, prompt: 'first', policy: POLICY });
+    const second = await runner.dispatch({ order: order({ id: 'W2' }), parent, prompt: 'rework', policy: POLICY });
+    assert.equal(first.ok, true); assert.equal(second.ok, true);
+    assert.equal(first.sessionId, second.sessionId);
+    assert.equal(host.log.filter(x => x === 'spawn').length, 1);
+    assert.equal(host.log.filter(x => x === 'send').length, 2);
 });
 
-/**
- * 返工走高级续写通道：宿主给子会话挂了 steer 句柄时，返工通过 steer 续写
- * 既有会话，**完全不再调用 startActivation**——子智能体数量不增。
- */
-test('dispatchViaActivation：宿主有 steer 句柄时返工走续写，不再 startActivation', async () => {
-    const captured = [];
-    const steered = [];
-    const subagents = {
-        providers: new Map([['spawn', {}]]),
-        async startActivation(spec) {
-            captured.push(spec);
-            return {
-                childId: 'child-9',
-                result: Promise.resolve({ output: [{ type: 'text', text: '首单交付' }], stopReason: 'completed' }),
-                dispose: async () => {},
-            };
-        },
-    };
-    const host = fakeHost({
-        memberRow: (read, spawned, name) => (spawned
-            ? { id: 's1', name, role: 'teammate', status: 'idle', model: 'm' }
-            : undefined),
-    });
-    const baseGet = host.ctx.get.bind(host.ctx);
-    host.ctx.get = (name) => {
-        if (name === 'subagents')
-            return subagents;
-        if (name === 'agents') {
-            return {
-                get: id => (id === 'child-9'
-                    ? {
-                        status: 'idle',
-                        session: { snapshotEvents: () => [] },
-                        steer: async (msg) => {
-                            steered.push(msg);
-                            return { output: [{ type: 'text', text: '返工交付' }], stopReason: 'completed' };
-                        },
-                    }
-                    : undefined),
-            };
-        }
-        return baseGet(name);
-    };
-
-    const runner = createTeamRunner({ ctx: host.ctx, activeTimeoutMs: 2000 });
-    const first = await runner.dispatch({
-        order: order({ member: member({ provider: 'qoder', model: 'mmodel' }) }),
-        parent: { id: 'lead' },
-        prompt: '干活',
-        policy: { timeoutSeconds: 10, provider: 'spawn', maxDepth: 1 },
-    });
-    assert.equal(first.ok, true);
-
-    const second = await runner.dispatch({
-        order: order({ id: 'W1', member: member({ id: 'coder-a', provider: 'qoder', model: 'mmodel' }) }),
-        parent: { id: 'lead' },
-        prompt: '上一轮被打回 缺回归测试',
-        policy: { timeoutSeconds: 10, provider: 'spawn', maxDepth: 1 },
-    });
-    assert.equal(second.ok, true);
-    assert.equal(captured.length, 1, '返工走 steer 续写，绝不新增 startActivation');
-    assert.equal(steered.length, 1, '应调用一次 steer 续写');
-    assert.match(steered[0]?.text ?? '', /上一轮被打回/, 'steer 内容应带上返工反馈');
-    assert.equal(second.sessionId, 'child-9', '产物回到既有会话');
-    assert.match(second.note, /返工·steer 会话/, 'note 应写明走 steer 续写');
-});
-
-/**
- * 普通自建成员（非返工、名册成员第一次出现）**仍然**每次新建子智能体——
- * 这是刻意保留的隔离特性，绝不能被返工复用误伤。
- */
-test('dispatchViaActivation：不同名册成员仍各自新建子智能体，互不复用', async () => {
-    const captured = [];
-    const subagents = {
-        providers: new Map([['spawn', {}]]),
-        async startActivation(spec) {
-            captured.push(spec);
-            return {
-                childId: `child-${captured.length}`,
-                result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }),
-                dispose: async () => {},
-            };
-        },
-    };
-    const host = fakeHost({
-        memberRow: (read, spawned, name) => (spawned
-            ? { id: 's1', name, role: 'teammate', status: 'idle', model: 'm' }
-            : undefined),
-    });
-    const baseGet = host.ctx.get.bind(host.ctx);
-    host.ctx.get = (name) => (name === 'subagents' ? subagents : baseGet(name));
-
-    const runner = createTeamRunner({ ctx: host.ctx, activeTimeoutMs: 2000 });
-    await runner.dispatch({
-        order: order({ member: member({ id: 'coder-a', provider: 'qoder', model: 'm' }) }),
-        parent: { id: 'lead' },
-        prompt: '干活',
-        policy: { timeoutSeconds: 10, provider: 'spawn', maxDepth: 1 },
-    });
-    await runner.dispatch({
-        order: order({ id: 'W2', member: member({ id: 'coder-b', provider: 'qoder', model: 'm' }) }),
-        parent: { id: 'lead' },
-        prompt: '干活',
-        policy: { timeoutSeconds: 10, provider: 'spawn', maxDepth: 1 },
-    });
-
-    assert.equal(captured.length, 2, '两个不同成员应各自创建子智能体');
-    // 两个新会话都没有携带复用 childId（是纯新建，而非返工续写同一会话）。
-    assert.equal('childId' in captured[0], false, '新成员首单不应传复用 childId');
-    assert.equal('childId' in captured[1], false, '新成员首单不应传复用 childId');
+test('原生队友缓存按父会话隔离，同一承包商不会串到别的团队', async () => {
+    const host = fakeHost({ memberRow: (_r, spawned, name) => spawned
+        ? { id: 's1', name, role: 'teammate', status: 'idle', model: 'm' } : undefined });
+    // Each team independently resolves its members.
+    let activeParent;
+    const list = host.teams.listMembers;
+    host.teams.listMembers = parent => parent === activeParent ? list(parent) : [];
+    const spawn = host.teams.spawnTeammate;
+    host.teams.spawnTeammate = async function (parent, request) { activeParent = parent; return spawn.call(this, parent, request); };
+    const runner = createTeamRunner({ ctx: host.ctx });
+    for (const id of ['parent-a', 'parent-b']) {
+        const result = await runner.dispatch({ order: order(), parent: { id }, prompt: 'work', policy: POLICY });
+        assert.equal(result.ok, true);
+    }
+    assert.equal(host.log.filter(x => x === 'spawn').length, 2);
+    assert.deepEqual(runner.snapshot().map(x => x.parentId), ['parent-a', 'parent-b']);
 });

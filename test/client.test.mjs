@@ -37,6 +37,7 @@ function makeReact({ open = false, live = undefined, trouble = undefined } = {})
         // 浮层要靠触发器量位置才渲染；给个假节点，让 measure() 能算出锚点。
         useRef: () => ({ current: { getBoundingClientRect: () => ({ right: 900, bottom: 40, left: 820, top: 12 }) } }),
         useEffect: () => {},
+        useCallback: fn => fn,
     };
 }
 
@@ -83,4 +84,39 @@ test('客户端注册设置座位与会话头「工地」按钮', async () => {
         effect: (setup) => setup(),
     });
     assert.deepEqual(seats.map(seat => seat.name).sort(), ['conversation.session.header.actions', 'settings.section']);
+});
+
+async function worksiteTree(live, sessionId = 'session-current') {
+    await import('../lib/client.js');
+    const react = makeReact({ open: true, live });
+    const client = loaded[0].factory(() => react);
+    const seats = [];
+    const slots = { inject: (_name, callback) => callback(), register: (seat, component) => { seats.push({ ...seat, component }); return () => {}; } };
+    client.apply({ inject: (names, callback) => callback({ get: () => names.includes('slots') ? slots : { getLocale: () => ({ active: 'zh' }) } }), effect: setup => setup() });
+    const tree = seats.find(seat => seat.name === 'conversation.session.header.actions').component({ sessionId });
+    const panelElement = tree.props.children[1];
+    const panel = panelElement.type(panelElement.props);
+    const boardElement = panel.props.children[1];
+    return { tree, panelElement, panel, board: boardElement.type(boardElement.props) };
+}
+
+test('工地弹层处于 top layer、按当前会话查询并明确区分配置与实际模型', async () => {
+    const { tree, panelElement, panel, board } = await worksiteTree({
+        runtime: { execution: 'native-roster', build: 'native-team-v2-20261030' },
+        members: [{ name: '力工', model: 'configured/model', actualModel: 'observed/model' }],
+    });
+    assert.equal(tree.props.children[0].props['aria-expanded'], true);
+    assert.equal(panelElement.props.sessionId, 'session-current');
+    assert.equal(panel.props.popover, 'auto');
+    assert.equal(panel.props.style.position, 'fixed');
+    assert.equal(panel.props.style.right, undefined);
+    assert.equal(panel.props.style.boxSizing, 'border-box');
+    assert.match(textOf(board).join(' '), /原生编队/);
+    assert.match(textOf(board).join(' '), /实际 observed\/model/);
+});
+
+test('旧宿主未加载新代码时，工地明确提示不能把名册配置视为实际验证', async () => {
+    const { board } = await worksiteTree({ members: [{ name: 'worker', model: 'configured/model' }] });
+    assert.match(textOf(board).join(' '), /宿主仍运行旧版/);
+    assert.match(textOf(board).join(' '), /配置 configured\/model/);
 });
