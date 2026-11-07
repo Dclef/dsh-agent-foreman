@@ -102,7 +102,7 @@ async function worksiteTree(live, sessionId = 'session-current') {
 
 test('工地弹层处于 top layer、按当前会话查询并明确区分配置与实际模型', async () => {
     const { tree, panelElement, panel, board } = await worksiteTree({
-        runtime: { execution: 'native-roster', build: 'native-team-v2-20261030' },
+        runtime: { execution: 'native-roster', build: 'native-team-v3-20261107' },
         members: [{ name: '力工', model: 'configured/model', actualModel: 'observed/model' }],
     });
     assert.equal(tree.props.children[0].props['aria-expanded'], true);

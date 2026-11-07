@@ -3,7 +3,7 @@
 > 父智能体派单，子智能体干活，父智能体验收。
 > 不预置角色、不写剧本：**谁干活、用什么模型，由你把关**。
 
-**最新版本：v0.4.0（2026-10-31）** — 原生多模型编队、响应式名册与工地弹层修复。
+**最新版本：v0.4.1（2026-11-07）** — 重新核验 DSH 0.2.2-rc.1 兼容性，改用宿主的公开 provider 发现接口。
 
 [安装与升级说明](docs/INSTALL.md)
 
@@ -193,7 +193,7 @@ npm test
 
 默认测试用假宿主跑真实插件（`test/harness.test.mjs`），不需要启动 DSH。
 设置 `DSH_HOST_ASAR` 可跑已安装宿主的只读契约测试，设置 `DSH_BROWSER_EXE` 可跑 Chrome
-响应式名册与保存交互测试；两个都启用时本版 151 项测试全部通过。
+响应式名册与保存交互测试；两个都启用时本版 157 项测试全部通过。
 
 ## 团队模式（实验）
 
@@ -208,9 +208,11 @@ npm test
 4. 优先收带 run/attempt/token 的 `foreman_report`；会话正文须等成员不再运行再回收。
 
 **兼容范围**：已对当前安装的 DSH `0.2.1-rc.5` 原生 TeamService/TeamRoster 代码
-执行离线契约测试。宿主公开建队 API 尚未透传模型参数，所以这是受保护的内部兼容桥，
-不是宿主已新增的公开参数。不会改写共享 `startActivation`、宿主 ASAR、父模型或全局默认。
-宿主升级后若契约不匹配会明确失败，不能保证任意版本兼容。
+执行离线契约测试，并在 DSH `0.2.2-rc.1` 上重新核验：`roster.spawn` 与 `startActivation`
+契约未变，宿主仍不透传 `agentOptions`，因此这条受保护的内部兼容桥仍然必要。
+宿主公开建队 API 尚未透传模型参数，这不是宿主已新增的公开参数。不会改写共享
+`startActivation`、宿主 ASAR、父模型或全局默认。宿主升级后若契约不匹配会明确失败，
+不能保证任意版本兼容。
 
 - 名册不同成员拥有独立的原生队友；名字含稳定身份与路由指纹，中文名留在描述中。
 - 团队模式同一成员的工单串行；不同成员可并行。需要更高并发请增加名册成员，
@@ -239,6 +241,21 @@ npm test
 **核心差异**：包工头的**模型可选 + 真实路由回显**是其它方案没有的。​dsh-agent-teams 的强项是完整任务 DAG（claim/attempt/quality gates），适合复杂多阶段项目；包工头侧重**按模型拆单、逐单验收**，工具更少（5 vs 14），上手更快。
 
 ## 版本说明
+
+### 0.4.1（2026-11-07）
+
+- **DSH 0.2.2-rc.1 兼容性核验**：本插件依赖的宿主 API 逐一核对，未发现破坏性变更
+  （`commands`、`skills`、`tools.register`、`subagentModelSelection` 的 volatile 引用、
+  cosmokit 写入符号、`startActivation` 的 `request.agentOptions`、`subagents.providers`、
+  `llm.resolveModelInfo`、原生团队 `roster.spawn` 兼容桥）。兼容桥已针对 0.2.2-rc.1 重新核验。
+- **provider 发现改为公开接口**：`readSubagentProviders` 优先使用 0.2.2-rc.1 新增的公开
+  `subagents.list()`，自定义 provider 名也能读到，不再依赖内部 `providers` Map；旧宿主仍
+  回退到 Map / `getProvider`。
+- **`engines.dsh` 更稳**：范围显式覆盖 `0.2.2` 预发布线，标准 semver 与宿主的
+  `includePrerelease: true` 两种判定都通过。此前 `0.2.2-rc.1` 只在宿主的宽松语义下通过。
+- **构建标识更新**为 `native-team-v3-20261107`，工地弹层据此区分是否加载了本版代码；
+  顺手修正空 `orderId` 上报的错误文案。
+- **157 项测试通过**（155 通过，2 项可选的宿主/浏览器契约测试因缺环境变量跳过）。
 
 ### 0.4.0（2026-10-31）
 

@@ -19,6 +19,7 @@ import {
     resolveDataDir,
 } from '../lib/store.js';
 import { buildPrompt, extractText, layerOrders, normalizeOrders, ForemanEngine } from '../lib/engine.js';
+import { readSubagentProviders } from '../lib/catalog.js';
 
 /** 造一个临时数据目录。 */
 function tempDir() {
@@ -282,4 +283,35 @@ test('rotate-cursors：能落盘并读回（重启后继续轮转，不回到第
     const back = new ForemanStore(dir).readRotateCursors();
     assert.equal(back.get('all'), 3);
     assert.equal(back.get('role:力工'), 1);
+});
+
+/**
+ * readSubagentProviders：DSH 0.2.2-rc.1 新增的公开 list() 优先。
+ *
+ * 这条路径能发现自定义 provider 名，也不再依赖内部 `providers` Map 字段。
+ * 旧宿主没有 list() 时仍要能退回 Map / getProvider，服务缺失或抛错返回空数组。
+ */
+test('readSubagentProviders：公开 list() 优先，能读到自定义名字', () => {
+    const ctx = { get: () => ({
+        list: () => ['spawn', 'my-custom-provider'],
+        // 故意给一份不同的内部 Map：list() 优先，不该被它带偏。
+        providers: new Map([['legacy-only', {}]]),
+    }) };
+    assert.deepEqual(readSubagentProviders(ctx), ['spawn', 'my-custom-provider']);
+});
+
+test('readSubagentProviders：list() 不可用或返回非数组时退回 providers Map', () => {
+    const withMap = { get: () => ({ providers: new Map([['spawn', {}], ['cursor', {}]]) }) };
+    assert.deepEqual(readSubagentProviders(withMap), ['spawn', 'cursor']);
+
+    const badList = { get: () => ({ list: () => undefined, providers: new Map([['spawn', {}]]) }) };
+    assert.deepEqual(readSubagentProviders(badList), ['spawn']);
+});
+
+test('readSubagentProviders：旧宿主只按已知名字探测；服务缺失或抛错返回空数组', () => {
+    const legacy = { get: () => ({ getProvider: name => (name === 'spawn' || name === 'external' ? {} : undefined) }) };
+    assert.deepEqual(readSubagentProviders(legacy), ['spawn', 'external']);
+
+    assert.deepEqual(readSubagentProviders({ get: () => undefined }), []);
+    assert.deepEqual(readSubagentProviders({ get: () => { throw new Error('未 inject'); } }), []);
 });

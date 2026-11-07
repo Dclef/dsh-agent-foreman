@@ -217,7 +217,7 @@ test('/api/state 与 /api/live 返回内存中加载的原生编队构建标识'
     for (const endpoint of ['/api/state', '/api/live']) {
         const body = await callJson(routes, ROUTE_PREFIX + endpoint);
         assert.equal(body.runtime.execution, 'native-roster');
-        assert.equal(body.runtime.build, 'native-team-v2-20261030');
+        assert.equal(body.runtime.build, 'native-team-v3-20261107');
         assert.ok(Number.isFinite(Date.parse(body.runtime.loadedAt)));
     }
 });

@@ -5,7 +5,7 @@
 
 Chinese docs: [README.zh.md](README.zh.md) · [Install / upgrade](docs/INSTALL.md)
 
-**Latest release: v0.4.0 (2026-10-31)** — native mixed-model teammates and a responsive roster editor.
+**Latest release: v0.4.1 (2026-11-07)** — re-verified against DSH 0.2.2-rc.1 with forward-compatible provider discovery.
 
 ## The problem
 
@@ -208,7 +208,9 @@ adapter adds `request.agentOptions` to the native reserved-child activation. Thi
 real roster membership and creation-time routing, including the first request and durable
 child descriptor. It never replaces a global method, changes the parent/default model, or
 modifies the host ASAR. An offline contract test runs against the installed DSH
-`0.2.1-rc.5` TeamService/TeamRoster source. Internal shape changes fail visibly; arbitrary
+`0.2.1-rc.5` TeamService/TeamRoster source, and the bridge was re-verified against
+`0.2.2-rc.1` (the `roster.spawn` / `startActivation` spec is unchanged; the host still
+does not forward `agentOptions`). Internal shape changes fail visibly; arbitrary
 future host versions are not guaranteed compatible.
 
 Before work is sent, the handshake completes and actual request configuration is verified.
@@ -226,6 +228,23 @@ run/attempt tokens; session-text recovery waits for the member turn to stop.
 - Restart DSH after updating the locally installed host plugin; refreshing the page is insufficient.
 
 ## Changelog
+
+### 0.4.1 (2026-11-07)
+
+- **DSH 0.2.2-rc.1 compatibility audit**: no breaking change found in the host APIs this
+  plugin uses (`commands`, `skills`, `tools.register`, `subagentModelSelection` volatile refs,
+  cosmokit's volatile write symbol, `startActivation`'s `request.agentOptions`,
+  `subagents.providers`, `llm.resolveModelInfo`, and the native-team `roster.spawn` bridge).
+  The internal bridge is re-verified against 0.2.2-rc.1.
+- **Forward-compatible provider discovery**: `readSubagentProviders` now prefers the public
+  `subagents.list()` added in 0.2.2-rc.1, so custom provider names are found without poking
+  the internal `providers` Map; older hosts still fall back to the Map / `getProvider`.
+- **Stronger `engines.dsh`**: the range now explicitly covers the `0.2.2` prerelease line, so
+  it passes under both standard semver and the host's `includePrerelease: true` check. Previously
+  `0.2.2-rc.1` only passed with the host's relaxed semantics.
+- **Loaded-runtime marker bumped** to `native-team-v3-20261107` so the worksite panel can tell
+  the reloaded plugin code from a stale copy. Minor cleanup of the blank-`orderId` report message.
+- **157 tests pass** (155 pass, 2 optional host/browser contract tests skipped without env vars).
 
 ### 0.4.0 (2026-10-31)
 
