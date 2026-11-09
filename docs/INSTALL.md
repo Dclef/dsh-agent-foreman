@@ -1,6 +1,6 @@
-# 安装与升级 · v0.4.1
+# 安装与升级 · v0.4.2
 
-发布日期：2026-11-07（Asia/Shanghai）。GitHub Release 与 npm 同步发布。
+发布日期：2026-11-09（Asia/Shanghai）。GitHub Release 与 npm 同步发布。
 
 ## 兼容与重要说明
 
@@ -13,7 +13,7 @@
   声明的安装范围不等于每个版本都经过原生团队契约验收；宿主内部结构改变时明确失败，
   不创建替代子会话或偷换父模型。
 - 每个承包商可选 provider、模型与思考等级。团队模式同一成员串行，不同成员可以并行。
-- 原生编队空闲卡片可能回显父模型的回退标签；实际调用以工地的请求配置记录为准。
+- 原生编队空闲卡片可能回显父模型的回退标签；实际调用以设置页「实时工地」里的请求配置记录为准。
 
 ## GitHub 安装 / 升级
 
@@ -31,13 +31,13 @@ dsh plugin add Dclef/dsh-agent-foreman
 在**当前 DSH profile 目录**执行，勿在无关项目或全局目录安装：
 
 ```bash
-npm install --save-exact dsh-agent-foreman@0.4.1
+npm install --save-exact dsh-agent-foreman@0.4.2
 ```
 
 profile 使用 pnpm 管理时沿用 pnpm，不混用锁文件：
 
 ```bash
-pnpm add --save-exact dsh-agent-foreman@0.4.1
+pnpm add --save-exact dsh-agent-foreman@0.4.2
 ```
 
 首次手动安装还需在 profile 的 package.json 中保留/加入：
@@ -56,13 +56,13 @@ pnpm add --save-exact dsh-agent-foreman@0.4.1
 
 ## 固定版本离线包
 
-GitHub Release 附带 dsh-agent-foreman-0.4.1.tgz，与 npm 发布内容完全相同。
+GitHub Release 附带 dsh-agent-foreman-0.4.2.tgz，与 npm 发布内容完全相同。
 假设下载到 E:/downloads，可在 profile 目录安装：
 
 ```bash
-npm install --save-exact E:/downloads/dsh-agent-foreman-0.4.1.tgz
+npm install --save-exact E:/downloads/dsh-agent-foreman-0.4.2.tgz
 # 或沿用该 profile 的 pnpm
-pnpm add E:/downloads/dsh-agent-foreman-0.4.1.tgz
+pnpm add E:/downloads/dsh-agent-foreman-0.4.2.tgz
 ```
 
 Release 同时提供 SHA256SUMS.txt；下载后校验再安装，并重启 DSH。
@@ -84,7 +84,7 @@ pnpm 可能沿用旧硬链接副本。更新后比较 profile/node_modules/dsh-a
 
 1. 打开「设置 → 包工头」，确认分组名册、完整配置路由和「编辑提示词」按钮可见。
 2. 在「派单策略」启用团队模式，给不同承包商分别选择模型并保存。
-3. 在会话「工地」查看原生编队运行标识，以及「配置 / 实际」模型。
+3. 在「设置 → 包工头 → 实时工地」查看原生编队运行标识，以及「配置 / 实际」模型。
 4. 最小测试只需让指定成员回复一句话；模型自述仅作参考，实际路由查看请求记录。
 5. Qoder Global 的 RESOURCE_LIMIT / 排队属于上游资源状态，不应声称已经得到模型回答。
 
