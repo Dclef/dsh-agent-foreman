@@ -4,27 +4,39 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { randomUUID } from 'node:crypto';
 import { spawnNativeTeammate } from '../lib/native-team.js';
+import { resolveTeamService } from '../lib/team-service.js';
+import { namedHost } from './fixtures/named-host.mjs';
 
 // Optional, read-only compatibility check against the actual installed ASAR.
 // Storage/activation are isolated doubles; no real model is called by this test.
 const archive = process.env.DSH_HOST_ASAR;
-test('installed TeamService -> TeamRoster -> native reserved-child activation preserves distinct models', { skip: !archive }, async () => {
+test('installed native team service preserves distinct model routes across supported host APIs', { skip: !archive }, async () => {
     // Electron virtualizes .asar paths; this fixture needs the archive bytes.
     const previousNoAsar = process.noAsar;
     if (process.versions.electron) process.noAsar = true;
     let fd;
     let source;
+    let subagentSource;
     try {
         fd = fs.openSync(archive, 'r');
         const prefix = Buffer.alloc(16); fs.readSync(fd, prefix, 0, 16, 0);
         const bytes = Buffer.alloc(prefix.readUInt32LE(12)); fs.readSync(fd, bytes, 0, bytes.length, 16);
-        let entry = JSON.parse(bytes);
-        const path = 'dsh/node_modules/@deepseek-ai/dsh-experimental-agent-team/lib/index.js';
-        for (const key of path.split('/')) entry = entry.files[key];
-        assert.equal(entry.unpacked, undefined);
-        const body = Buffer.alloc(entry.size);
-        fs.readSync(fd, body, 0, body.length, 8 + prefix.readUInt32LE(4) + Number(entry.offset));
-        source = body.toString('utf8');
+        const header = JSON.parse(bytes);
+        function readEntry(path) {
+            let entry = header;
+            for (const key of path.split('/')) entry = entry?.files?.[key];
+            if (!entry) return undefined;
+            assert.equal(entry.unpacked, undefined);
+            const body = Buffer.alloc(entry.size);
+            fs.readSync(fd, body, 0, body.length, 8 + prefix.readUInt32LE(4) + Number(entry.offset));
+            return body.toString('utf8');
+        }
+        source = readEntry('dsh/node_modules/@deepseek-ai/dsh-experimental-agent-team/lib/index.js');
+        if (source === undefined) {
+            source = readEntry('dsh/node_modules/@deepseek-ai/dsh-agent-team/lib/index.js');
+            subagentSource = readEntry('dsh/node_modules/@deepseek-ai/dsh-subagent/lib/index.js');
+            assert.ok(source && subagentSource, 'supported native team and subagent packages must exist');
+        }
     } finally {
         try { if (fd !== undefined) fs.closeSync(fd); }
         finally {
@@ -33,6 +45,58 @@ test('installed TeamService -> TeamRoster -> native reserved-child activation pr
                 else process.noAsar = previousNoAsar;
             }
         }
+    }
+    if (subagentSource !== undefined) {
+        function actualMethod(text, signature, globals) {
+            const start = text.indexOf(signature);
+            const lineStart = text.lastIndexOf(String.fromCharCode(10), start) + 1;
+            const indent = text.slice(lineStart, start);
+            const boundary = String.fromCharCode(10) + indent + '}';
+            const end = text.indexOf(boundary, start);
+            assert.ok(start > 0 && end > start, 'installed public method layout must match: ' + signature);
+            const code = text.slice(start, end + boundary.length);
+            return vm.runInNewContext('({' + code + '})', globals)[signature.replace(/^async /, '').split('(')[0]];
+        }
+        const host = namedHost();
+        host.subagents.startActivation = actualMethod(subagentSource, 'async startActivation(spec) {', {
+            SubagentError: Error,
+            assertSubagentMaxDepth: depth => assert.equal(depth, 2),
+            assertObjectJsonSchema: () => assert.fail('no structured output was requested'),
+        });
+        host.ctx.subagents = host.subagents;
+        host.teams.ctx = host.ctx;
+        host.teams.projection = { stateOf: session => {
+            assert.strictEqual(session, host.parent.session);
+            return { enabled: true };
+        } };
+        host.teams.isEnabled = actualMethod(source, 'isEnabled(caller) {', {});
+        const resolveAssignee = actualMethod(source, 'async resolveAssignee(root, target, signal) {', { TeamError: Error });
+        const updateTask = host.teams.updateTask;
+        host.teams.updateTask = async function(caller, request, signal) {
+            if (request.action === 'reassign') {
+                const owner = await resolveAssignee.call({ ctx: host.ctx }, caller, request.owner, signal);
+                assert.equal(owner.ownerId, request.owner);
+            }
+            return updateTask.call(this, caller, request, signal);
+        };
+        const original = host.subagents.startActivation;
+        const adapter = resolveTeamService(host.ctx);
+        assert.equal(adapter.api, 'named-subagents');
+        const children = await Promise.all(['alpha', 'beta'].map(name => spawnNativeTeammate({
+            teams: adapter, parent: host.parent,
+            request: { name, provider: 'spawn', context: 'fresh', description: name, prompt: [{ type: 'text', text: name }], signal: new AbortController().signal },
+            agentOptions: { provider: 'provider-' + name, model: 'model-' + name, reasoningEffort: 'high' }, maxDepth: 2,
+        })));
+        assert.equal(new Set(children.map(child => child.member.id)).size, 2);
+        assert.deepEqual(host.specs.map(spec => [spec.name, spec.agentOptions.model, spec.agentOptions.reasoningEffort]), [['alpha', 'model-alpha', 'high'], ['beta', 'model-beta', 'high']]);
+        assert.ok(host.specs.every(spec => spec.parent === host.parent && !('request' in spec) && spec.delivery === 'parent'));
+        assert.strictEqual(host.subagents.startActivation, original);
+        assert.equal(host.parent.options.model, 'parent-model');
+        const signal = new AbortController().signal;
+        const task = await adapter.createTask(host.parent, { subject: 'route check', description: 'native task owner' }, signal);
+        const assigned = await adapter.updateTask(host.parent, { taskId: task.id, expectedRevision: task.revision, action: 'reassign', owner: 'alpha' }, signal);
+        assert.equal(assigned.ownerId, children[0].member.id);
+        return;
     }
     const start = source.indexOf('var TeamRoster = class {');
     const end = source.indexOf(String.fromCharCode(10) + '};', start);

@@ -244,7 +244,7 @@ function createHost({ members = [], text = '交付摘要：做完了', stopReaso
 
     // Non-team tests explicitly exercise standalone mode; production defaults
     // remain teamMode:true and missing native services must not be hidden.
-    fs.writeFileSync(path.join(dataDir, 'roster.json'), JSON.stringify({ members: [], policy: { teamMode: team } }));
+    fs.writeFileSync(path.join(dataDir, 'roster.json'), JSON.stringify({ members: [], policy: { teamMode: team, teamFallback: false } }));
     apply(ctx, { ...Config({}), dataDir, members });
     /** 放行所有挂起的假子智能体（`hold` 模式用）。 */
     const releaseAll = () => {
@@ -316,6 +316,13 @@ test('插件导出契约：名字、必需服务、配置 schema', () => {
     assert.deepEqual(config.members, []);
 });
 
+test('团队探针标记宿主团队开关能力', async () => {
+    const host = createHost({ team: true });
+    const result = await call(host, '/plugins/dsh-agent-foreman/api/state');
+    const body = JSON.parse(result.body);
+    assert.equal(body.teamProbe.ctx.switch, 'legacy-host');
+});
+
 test('挂载后注册五个工具与六条路由', () => {
     const host = createHost();
     // foreman_report 是承包商的主动上报通道（agent-teams 式自报），
@@ -382,6 +389,17 @@ test('foreman_dispatch：两张工单都跑完，看板带产物与路由', asyn
     assert.match(result.summary, /交付摘要：做完了/);
     assert.equal(result.orders.length, 2);
     assert.equal(result.orders[0].status, 'done');
+});
+
+test('团队兜底：宿主团队服务缺失时退回普通子会话并留下诊断', async () => {
+    const host = createHost({ team: false, members: [{ name: 'fallback-worker', provider: 'deepseek-official', model: 'deepseek-flash' }] });
+    const policy = await call(host, '/plugins/dsh-agent-foreman/api/policy', { method: 'POST', body: JSON.stringify({ teamMode: true, teamFallback: true }) });
+    assert.equal(policy.status, 200);
+    const result = await host.tools.get('foreman_dispatch').execute({ goal: '兜底', orders: [{ id: 'F1', title: '普通派单', task: '使用普通子会话完成', accept: '收到交付' }] }, execOf());
+    assert.equal(result.ok, true);
+    assert.equal(host.teamSpawned.length, 0);
+    assert.equal(host.activations.length, 1);
+    assert.match(result.orders[0].teamMode, /自动退回普通子会话/);
 });
 
 test('原生团队：创建真实队友并在首轮锁定模型，共享任务进团队面板', async () => {

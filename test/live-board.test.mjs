@@ -217,7 +217,7 @@ test('/api/state 与 /api/live 返回内存中加载的原生编队构建标识'
     for (const endpoint of ['/api/state', '/api/live']) {
         const body = await callJson(routes, ROUTE_PREFIX + endpoint);
         assert.equal(body.runtime.execution, 'native-roster');
-        assert.equal(body.runtime.build, 'native-team-v3-20261107');
+        assert.equal(body.runtime.build, 'native-team-v5-20261113');
         assert.ok(Number.isFinite(Date.parse(body.runtime.loadedAt)));
     }
 });
@@ -232,6 +232,9 @@ test('page：含实时工地区块的关键文案', () => {
     assert.match(html, /连接中断，重试中/);
     assert.match(html, /\/api\/live/);
     assert.match(html, /2500/);
+    assert.match(html, /teamFallback/);
+    assert.match(html, /team-status-hint/);
+    assert.match(html, /启用智能体团队协作/);
     // 新区块要排在「最近派单」之前
     assert.ok(html.indexOf('实时工地') < html.indexOf('最近派单'), '实时工地应插在最近派单之前');
 });
