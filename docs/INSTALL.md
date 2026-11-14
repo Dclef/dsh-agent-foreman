@@ -1,13 +1,13 @@
-# 安装与升级 · v0.5.0
+# 安装与升级 · v0.5.1
 
-发布日期：2026-11-13（Asia/Shanghai）。GitHub Release 与 npm 同步发布。
+发布日期：2026-11-14（Asia/Shanghai）。GitHub Release 与 npm 同步发布。
 
-**定位（0.5.0 起）**：DSH 已内置原生「多 Agent 编队」（持久 teammate、peer 消息、共享任务板）。本插件
-**不再宣称补齐编队空缺**，而是架在原生能力之上的一层薄编排：**按模型派单 + 逐单独立验收 + 返工闭环**。
-两者并存互补，请按实际需求选用，不要叠加同一份活。
+**定位（0.5.1）**：父模型通常最贵。包工头把执行隔离到看不到父会话上下文的独立子会话（子会话里的文件、命令输出、报错与工具回显都不进父会话），干完只自报一份简短交付摘要（要求 ≤2000 字、不贴代码/日志原文）；超 2000 字自动打回重出一次、仍超判失败，不截断、不压缩、不把超长文本送进父模型看板，全文落盘按需读取，父模型只花 token 做拆单与逐单独立验收——**省的是昂贵父模型的执行上下文**，与承包商用什么模型无关（名册 `provider` 留空即跟随父会话，照样省）。
 
-**验证范围**：0.5.0 的新增行为（写入范围提示、验收清单、独立签收、团队开关提示、显式团队兜底）由 test/optimization.test.mjs、test/harness.test.mjs 与离线回归
-套件验证。0.5.0 包含 DSH `0.2.2-rc.2` 适配：普通激活参数、具名成员、任务归属、取消隔离与真实宿主 ASAR 契约测试；ASAR / headless Chrome 用例需配置路径，否则明确跳过。**未调用真实模型、未启用真实原生编队，也不是运行中的真实浏览器会话端到端测试**。
+DSH 已内置原生「多 Agent 编队」（持久 teammate、peer 消息、共享任务板）。本插件**不再宣称补齐编队空缺**，而是架在原生能力之上的一层薄编排：**按模型派单 + 逐单独立验收 + 返工闭环**。两者并存互补，请按实际需求选用，不要叠加同一份活。
+
+**验证范围**：0.5.1 的新增行为（写入范围提示、验收清单、独立签收、团队开关提示、显式团队兜底）由 test/optimization.test.mjs、test/harness.test.mjs 与离线回归
+套件验证。0.5.1 沿用 0.5.0 的 DSH `0.2.2-rc.2` 适配：普通激活参数、具名成员、任务归属、取消隔离与真实宿主 ASAR 契约测试；ASAR / headless Chrome 用例需配置路径，否则明确跳过。**未调用真实模型、未启用真实原生编队，也不是运行中的真实浏览器会话端到端测试**。
 
 ## 兼容与重要说明
 
@@ -15,7 +15,7 @@
   DSH `>=0.2.1-rc.2 <0.3.0-0 || >=0.2.2-0 <0.3.0-0`。
   第二段显式覆盖 `0.2.2` 预发布线，使范围在标准 semver 与宿主 `includePrerelease: true`
   两种判定下都通过（DSH 0.2.2-rc.1 因此不会被入口拒绝）。
-- **DSH `0.2.2-rc.2` 公开接口适配已包含在 0.5.0**：普通激活使用平铺参数；团队成员通过具名子智能体创建和复用，任务归属转换成确切的成员会话 ID，取消后只等待该成员空闲。尊重当前会话团队开关，不自动开启。Foreman 的 `teamMode` 与宿主开关都打开时才走原生团队；开启 `teamFallback` 后，宿主团队不可用或开关关闭才会退回普通子会话。
+- **DSH `0.2.2-rc.2` 公开接口适配已包含在 0.5.1**：普通激活使用平铺参数；团队成员通过具名子智能体创建和复用，任务归属转换成确切的成员会话 ID，取消后只等待该成员空闲。尊重当前会话团队开关，不自动开启。Foreman 的 `teamMode` 与宿主开关都打开时才走原生团队；开启 `teamFallback` 后，宿主团队不可用或开关关闭才会退回普通子会话。
 - **旧版兼容桥仍保留**：DSH 0.2.1-rc.5 / 0.2.2-rc.1 使用旧版内部契约；这些宿主不具备 rc.2 的公开具名成员接口时，插件会明确走兼容路径或报告不兼容，不创建替代子会话或偷换父模型。
 - 每个承包商可选 provider、模型与思考等级。团队模式同一成员串行，不同成员可以并行。
 - 原生编队空闲卡片可能回显父模型的回退标签；实际调用以设置页「实时工地」里的请求配置记录为准。
@@ -36,13 +36,13 @@ dsh plugin add Dclef/dsh-agent-foreman
 在**当前 DSH profile 目录**执行，勿在无关项目或全局目录安装：
 
 ```bash
-npm install --save-exact dsh-agent-foreman@0.5.0
+npm install --save-exact dsh-agent-foreman@0.5.1
 ```
 
 profile 使用 pnpm 管理时沿用 pnpm，不混用锁文件：
 
 ```bash
-pnpm add --save-exact dsh-agent-foreman@0.5.0
+pnpm add --save-exact dsh-agent-foreman@0.5.1
 ```
 
 首次手动安装还需在 profile 的 package.json 中保留/加入：
@@ -61,13 +61,13 @@ pnpm add --save-exact dsh-agent-foreman@0.5.0
 
 ## 固定版本离线包
 
-GitHub Release 附带 dsh-agent-foreman-0.5.0.tgz，与 npm 发布内容完全相同。
+GitHub Release 附带 dsh-agent-foreman-0.5.1.tgz，与 npm 发布内容完全相同。
 假设下载到 E:/downloads，可在 profile 目录安装：
 
 ```bash
-npm install --save-exact E:/downloads/dsh-agent-foreman-0.5.0.tgz
+npm install --save-exact E:/downloads/dsh-agent-foreman-0.5.1.tgz
 # 或沿用该 profile 的 pnpm
-pnpm add E:/downloads/dsh-agent-foreman-0.5.0.tgz
+pnpm add E:/downloads/dsh-agent-foreman-0.5.1.tgz
 ```
 
 Release 同时提供 SHA256SUMS.txt；下载后校验再安装，并重启 DSH。

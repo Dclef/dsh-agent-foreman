@@ -4,12 +4,14 @@
 
 # Foreman · dsh-agent-foreman
 
-> The parent splits the work; contractors do it; the parent signs off each order against a checklist.
+> The parent only splits work and signs off; execution runs in isolated child sessions that cannot see the parent context — **what you save is the expensive parent model's execution tokens**.
 > No preset roles, no scripted phases: **you decide who works, and with which model**.
 
-**Version compatibility (0.5.0):** includes the **DSH 0.2.2-rc.2 compatibility fix**, retaining the existing **0.2.2-rc.1** / **0.2.1-rc.5** paths. The host is still an RC; no real-model end-to-end verification has been performed. Declared `engines.dsh`: `>=0.2.1-rc.2 <0.3.0-0 || >=0.2.2-0 <0.3.0-0`; Node.js `^22.19.0 || >=24.0.0`. Older UI/install notes apply only to the package they shipped with.
+**Version compatibility (0.5.1):** includes the **DSH 0.2.2-rc.2 compatibility fix**, retaining the existing **0.2.2-rc.1** / **0.2.1-rc.5** paths. The host is still an RC; no real-model end-to-end verification has been performed. Declared `engines.dsh`: `>=0.2.1-rc.2 <0.3.0-0 || >=0.2.2-0 <0.3.0-0`; Node.js `^22.19.0 || >=24.0.0`. Older UI/install notes apply only to the package they shipped with.
 
 **Positioning change (important):** DSH now ships a **native multi-agent team** (durable named teammates, peer messages, shared task board, Web panel). Foreman **no longer claims to fill a "missing team" gap** — it is a thin orchestration layer on top of native capabilities: **model-based dispatch + per-order independent review + rework loop**. The two coexist and complement each other. Native teams handle "how a crew collaborates"; Foreman handles "which model runs each order, and who signs each one off". If you only need named teammates, use the native team directly.
+
+**Core idea (0.5.1):** the parent model is usually the expensive one. Letting it read files, run commands and chase errors pulls the whole execution transcript into its context. Foreman isolates execution into child sessions that cannot see the parent context: the files it reads, commands it runs, stack traces and tool transcripts **stay in the child session and never enter the parent context**. Each returns only a short self-written delivery summary (the prompt asks for ≤2000 chars and no pasted code/logs); **over 2000 chars triggers one automatic redo, and a second overflow fails the order** — no truncation, no overlong text in the parent board, full text only on disk on demand. The parent spends its tokens on splitting work, reading summaries, signing off each order against a checklist, and writing rework feedback. **The saving is the execution context that never enters the expensive parent context** — it does not depend on which model the contractor uses (leaving `provider` empty follows the parent model and still saves). Per-contractor model routing is optional capability, not the precondition for saving.
 
 **Install:** [GitHub / npm](#install-and-choose-versions) · [prompt for an AI assistant](#let-an-ai-install-it-for-you).
 
@@ -23,7 +25,7 @@ DSH `0.2.2-rc.2` supports choosing a model when creating a native named subagent
 
 ![Settings → 包工头: responsive contractor groups with readable models and Edit prompt controls](docs/settings-roster.png)
 
-## Why Foreman (0.5.0)
+## Why Foreman (0.5.1)
 
 | Capability | What it changes |
 | --- | --- |
@@ -40,24 +42,33 @@ DSH `0.2.2-rc.2` supports choosing a model when creating a native named subagent
 
 The settings page and runtime skill follow the host's official locale service: English / Simplified Chinese switch live without a page reload.
 
+## Borrowed from the ecosystem (after 0.5.0)
+
+Foreman reads the heavier plugins in the same ecosystem and takes only the few pieces that fit a thin orchestration layer.
+
+- **From 文渊阁 (`suifei/dsh-ai-team`)** — (1) **`qaChecklist` / `qaChecks`-style item-by-item sign-off and a QA hard gate**: a review may require an objective checklist and per-item conclusions (`qaRequired` + `verdicts[].checks`); a pass without them is rejected with the error code `QA_CHECKS_REQUIRED`. (2) **Append-only ledger integrity via a SHA-256 hash chain**: `lib/store.js` links every ledger entry with `chainHash`, `verifyLedger` walks the chain segment by segment, and `LEDGER_GENESIS` anchors the head. Trimming old runs legitimately produces an **anchor break**, which is expected behaviour, not a tamper alarm.
+- **From Cabinet Mode (`luodaoyi/dsh-cabinet-mode`)** — (3) **Prompt-level budget and stop conditions**: `orders[].budget` carries `maxToolCalls` / `maxRetries` / `stopCondition`. It is a **prompt-level (提示级) convention handed to the contractor in its prompt, not a runtime counter** — nothing blocks execution when it is exceeded. (4) **Member / order usage snapshot**: `usage` reports per-member and per-order readings, and a missing value renders as `—`. It is a **host projection reading, not a billing total (非计费总量)**.
+- **Deliberately not copied**: no three-pane workbench, no persona presets, no standalone ledger system. These are thin enhancements only — Foreman is still a thin **"model dispatch + per-order independent review"** orchestration layer.
+
 ## Verification scope (honest)
 
 - Offline regression covers strict old/new host doubles, full-chain dispatch, model isolation, cancellation cleanup, pure functions and snapshot recovery. Actual host ASAR contracts and headless Chrome tests require their configured paths and explicitly skip otherwise. **No real model was called; native teamwork was not enabled.**
 - 0.5.0 additions are covered by `test/optimization.test.mjs`: scope normalization, overlap detection, checklist injection, feedback-required fails, independent sign-off marker, board output.
 - **Not done:** real multi-session concurrent dispatch, real browser responsive interaction, end-to-end with native team actually enabled, future DSH version compatibility. The `0.2.2-rc.2` path uses public named-subagent APIs; older hosts retain the guarded per-call internal adapter. Arbitrary future host versions are **not** guaranteed compatible.
-- No promise of token savings, fixed speed-up, or that model selection always reaches the child session (the board echoes declared vs actual so you can check).
+- The additions above are **pure-function / offline regression coverage only**: `test/checks.test.mjs` (qaRequired, per-item checks gate, budget and usage projections), `test/ledger-chain.test.mjs` (`chainHash` / `verifyLedger` / anchor breaks) and the Node 22/24 matrix in `.github/workflows/ci.yml`. **No real model was called, and the accuracy of host-projected `usage` numbers was not verified.**
+- **Why this saves the parent model's money**: the contractors run in isolated child sessions that cannot see the parent context, so the files, command output, error logs and long tool transcripts of the execution never enter the parent session. The parent receives only a short self-written delivery summary (≤2000 chars, no pasted source; over-long summaries trigger one automatic redo, then fail — no truncation or compression) plus an on-demand artifact path, and spends its tokens on splitting work and per-order sign-off — not on doing the work itself. Which model the contractor uses is your choice (the roster may even follow the parent model); the saving comes from **keeping execution context off the expensive parent context**, not from a cheaper child model. We do **not** promise a specific saving amount, a fixed speed-up, or that model selection always reaches the child session (the board echoes declared vs actual so you can check).
 
 ## Install and choose versions
 
-**Version 0.5.0 includes the DSH `0.2.2-rc.2` compatibility path; the host is still an RC. Fully restart DSH after installing.**
+**Version 0.5.1 includes the DSH `0.2.2-rc.2` compatibility path; the host is still an RC. Fully restart DSH after installing.**
 
 | Use case | DeepSeek Harness | Foreman |
 | --- | --- | --- |
-| Current release compatibility | `0.2.2-rc.2` | `0.5.0` |
-| Existing supported range | `0.2.1-rc.2` | `0.5.0` |
-| Re-verified preview host | `0.2.2-rc.1` | `0.5.0` |
-| Older verified bridge host | `0.2.1-rc.5` | `0.5.0` |
-| Minimum installable host | `>=0.2.1-rc.2 <0.3.0-0` | `0.5.0` |
+| Current release compatibility | `0.2.2-rc.2` | `0.5.1` |
+| Existing supported range | `0.2.1-rc.2` | `0.5.1` |
+| Re-verified preview host | `0.2.2-rc.1` | `0.5.1` |
+| Older verified bridge host | `0.2.1-rc.5` | `0.5.1` |
+| Minimum installable host | `>=0.2.1-rc.2 <0.3.0-0` | `0.5.1` |
 
 The declared `engines.dsh` range also covers the `0.2.2` prerelease line; CI verifies the specific hosts above, the installer accepts other hosts at or above the minimum.
 
@@ -74,9 +85,9 @@ Install it, then **fully restart DSH** — a browser refresh alone does not relo
 In the active DSH profile directory:
 
 ```bash
-npm install --save-exact dsh-agent-foreman@0.5.0
+npm install --save-exact dsh-agent-foreman@0.5.1
 # or, if the profile uses pnpm:
-pnpm add --save-exact dsh-agent-foreman@0.5.0
+pnpm add --save-exact dsh-agent-foreman@0.5.1
 ```
 
 A first manual install also needs `"dsh-agent-foreman"` in `dsh.profile.bundles` of the profile's `package.json` (merge it, do not overwrite other plugins). GitHub Release also ships a matching `.tgz` plus `SHA256SUMS.txt`. See [docs/INSTALL.md](docs/INSTALL.md) for the offline tarball, `file:` dev install, and the pnpm hard-link re-link caveat.
@@ -91,14 +102,14 @@ A first manual install also needs `"dsh-agent-foreman"` in `dsh.profile.bundles`
 ## Let an AI install it for you
 
 ```text
-Install the DeepSeek Harness plugin dsh-agent-foreman@0.5.0 for me:
+Install the DeepSeek Harness plugin dsh-agent-foreman@0.5.1 for me:
 
 1. Confirm my DSH version is >=0.2.1-rc.2 <0.3.0-0 and identify the target profile.
 2. Prefer dsh plugin add Dclef/dsh-agent-foreman, or in that profile run
-   npm install --save-exact dsh-agent-foreman@0.5.0 (pnpm: pnpm add).
+   npm install --save-exact dsh-agent-foreman@0.5.1 (pnpm: pnpm add).
    On a first manual install merge "dsh-agent-foreman" into dsh.profile.bundles,
    without overwriting other plugins.
-3. Verify the installed version is 0.5.0; do not claim success unless you read the version.
+3. Verify the installed version is 0.5.1; do not claim success unless you read the version.
 4. Remind me to fully quit and restart DSH and open a new session; a browser refresh
    alone does not reload the host plugin.
 5. Do not modify the host ASAR, switch global models, or invent CLI commands.
@@ -172,10 +183,13 @@ A contractor is a name, an optional role (a lightweight trade label for routing,
 
 | | Native multi-agent team | Cabinet Mode | 文渊阁 dsh-ai-team | Foreman |
 | --- | --- | --- | --- | --- |
-| Positioning | Host built-in: durable teammates / messages / task board | persona preset + right-panel UI | standalone 3-pane workbench + append-only ledger | thin **model dispatch + per-order review** layer over teams |
+| Positioning | Host built-in: durable teammates / messages / task board | persona preset + right-panel UI + prompt-level budget | standalone 3-pane workbench + append-only **SHA-256 hash-chain** ledger | thin **model dispatch + per-order review** layer over teams (`qaRequired` / `budget` / `usage` / `verifyLedger`) |
 | Per-member model | no (`spawn_teammate` has no model) | yes (official model picker) | yes (member model dropdown) | **yes** — `agentOptions` locked at creation |
-| Independent review | no | 大理寺卿 / 左都御史 (persona) | **yes** — maker never accepts + QA hard gate | **yes** — parent signs off against checklist |
+| Independent review | no | 大理寺卿 / 左都御史 (persona) | **yes** — maker never accepts + QA hard gate (`qaChecks` item-by-item sign-off) | **yes** — parent signs off against checklist; `qaRequired` + `verdicts[].checks` hard gate (`QA_CHECKS_REQUIRED`) |
 | Write-scope hints | yes `writeScopes` (hint only) | — | — | yes — same shape, soft warning (hint only) |
+| Prompt-level budget | — | prompt-level convention, not a runtime counter | — | yes — `orders[].budget` (`maxToolCalls` / `maxRetries` / `stopCondition`), **hint only** |
+| Usage snapshot | no | member usage snapshot (host projection) | ledger totals | yes — `usage`, missing value shows `—`, **not a billing total** |
+| Ledger integrity | no | — | **SHA-256 hash chain** (`chainHash`) | `verifyLedger` + `LEDGER_GENESIS`; trimmed anchors reported as expected breaks |
 | Rework loop | no | — | request changes | yes — auto re-dispatch with feedback |
 | Real route echo | no | — | — | **yes** — declared vs actual model |
 | Tool count | 9 Team tools | standard-mode tools | own command set | 4 + self-report |
@@ -183,6 +197,19 @@ A contractor is a name, an optional role (a lightweight trade label for routing,
 **Key difference**: native teams solve "how a crew collaborates"; Foreman adds only the two things they do not — **model-based dispatch** and **per-order independent review + rework**. Cabinet Mode leans on persona and visualization, 文渊阁 on a full persistent task system; both are heavier than Foreman. Pick by project size, do not stack them on the same work.
 
 ## Changelog
+
+### 0.5.1 (2026-11-14)
+
+- **Positioning clarified**: what is saved is the **expensive parent model's execution context**, not a cheaper child model. Contractors run in isolated child sessions that cannot see the parent context, so files, command output, stack traces and tool transcripts never enter the parent session. The parent receives only a short self-written delivery summary (≤2000 chars, no pasted source; over-long summaries are automatically redone once, then fail — no truncation or compression) and spends its tokens on splitting work and per-order sign-off. Leaving `provider` empty to follow the parent model still saves.
+- **Per-item review hard gate**: `qaRequired` + `verdicts[].checks`; a pass must sign off every `checklist` item or is rejected with `QA_CHECKS_REQUIRED` (`INVALID_CHECKS` for malformed entries). Old single-verdict passes are unchanged.
+- **Prompt-level budget and stop conditions**: `orders[].budget` (`maxToolCalls` / `maxRetries` / `stopCondition`), explicitly not a runtime counter.
+- **Usage snapshot**: `usage` (input/output/total tokens) on the board, live board, member cards and ledger; missing values render as `—` and are labelled host projection readings, not billing totals.
+- **Ledger integrity**: every `runs.jsonl` line carries `prevHash` / `hash` (SHA-256); exports `chainHash`, `verifyLedger`, `LEDGER_GENESIS`. Trimming old runs produces an expected `anchor:` break; rewrites are atomic.
+- **Fixed over-long teammate names**: `lib/team.js` previously truncated `base` to 40 chars and appended a 16-char fingerprint, producing 36–39 char names that the host's 1–32 rule rejected at spawn time. Now an exported pure function `teammateDisplayName()` sizes the base to the remaining budget; generations 1..100 are all legal. The 16-char fingerprint is kept so existing members remain reusable across rounds.
+- **First CI**: `.github/workflows/ci.yml` runs `npm test` on Node 22 and 24 for pushes, PRs and manual dispatch, with least privileges and no secrets.
+- **Borrowed from the ecosystem**: item-by-item review and the hash-chained ledger from [文渊阁](https://github.com/suifei/dsh-ai-team), prompt-level budget and usage snapshots from [Cabinet Mode](https://github.com/luodaoyi/dsh-cabinet-mode). Only thin-layer mechanisms were taken; no workbench or persona presets copied.
+- **Over-long summaries are redone, not truncated**: `SUMMARY_LIMIT=2000` + `checkDelivery()`. Over 2000 chars triggers one automatic redo that rewrites only the summary (no re-running the task); a second overflow fails the order, with full text on disk only. `deliveryRedo` is recorded in the ledger and board. Team mode does not spawn a second activation and is honestly labelled as not auto-redone.
+- **244 tests: 241 passed, 0 failed, 3 skipped**: new `test/checks.test.mjs`, `test/ledger-chain.test.mjs`, `test/team-name.test.mjs`, `test/delivery-limit.test.mjs`. No real model was called; host-projected `usage` accuracy and real-browser rendering were not verified.
 
 ### 0.5.0 (2026-11-13)
 
