@@ -2,3 +2,7 @@ node_modules/
 .probe-tmp/
 *.log
 .patch-*.py
+
+# 发版产物只作为 GitHub Release 资产上传，不入库（历史惯例：*.tgz / SHA256SUMS.txt 从未 tracked）
+*.tgz
+SHA256SUMS.txt
